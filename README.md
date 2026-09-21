@@ -62,6 +62,16 @@ make -C Sources/WireGuardKitGo test GO=/absolute/path/to/go
 swift test --enable-xctest
 ```
 
+The C regression tests check key generation with assertions disabled, RNG failure, and kernel structure layouts against the macOS SDK:
+
+```sh
+mkdir -p build/tests
+xcrun clang -DNDEBUG -DCCRandomGenerateBytes=wg_test_random -fsanitize=address,undefined -I Sources/WireGuardKitC Tests/WireGuardKitCTests/key-generation.c Sources/WireGuardKitC/x25519.c -o build/tests/key-generation
+build/tests/key-generation
+xcrun clang -std=c11 -Wall -Wextra -Werror -I Sources/WireGuardKitC Tests/WireGuardKitCTests/darwin-layout.c -o build/tests/darwin-layout
+build/tests/darwin-layout
+```
+
 Add `--sanitize thread` to the Swift test command to check synchronization. Run upstream Go tests:
 
 ```sh
@@ -69,6 +79,8 @@ cd Sources/WireGuardKitGo
 GOTOOLCHAIN=local go mod download github.com/google/btree # Upstream netstack test checksum
 GOTOOLCHAIN=local go test -race ./... golang.zx2c4.com/wireguard/...
 ```
+
+From `Sources/WireGuardKitGo`, run `go test -run '^$' -fuzz '^FuzzUAPI$' -fuzztime=30s` and `go test -run '^$' -fuzz '^FuzzStackCapture$' -fuzztime=30s` for bounded parser and diagnostic fuzz checks. UAPI tests use an in-memory TUN and do not establish a real VPN.
 
 ## Backend dependencies
 
@@ -82,11 +94,19 @@ Update these dependencies explicitly, resolve WireGuard `master` and gVisor `go`
 
 `TunnelConfiguration` is now a value type: edit a `var` copy and pass it back explicitly. Keys are immutable final `Sendable` types; `BaseKey` is a protocol. Adapter callbacks are `@Sendable`; app tunnel management and UI delegates are isolated to `MainActor`. Internal target names and bundle identifiers are unchanged.
 
+Generate keys with `try PrivateKey()` and handle RNG failure. Generation runs in both Debug and Release; failures never produce a key. Hex/base64 initializers reject trailing content, including embedded NUL suffixes.
+
 `WireGuardAdapter` is a checked `Sendable` type. An actor owns its lifecycle state, and a single asynchronous operation queue preserves submission order across DNS resolution and NetworkExtension callbacks. Read `await adapter.lifecycleState` for the current phase. The existing callback API remains available; callbacks do not run on the main actor unless the caller explicitly transfers them there.
 
 Applying network settings has a five-second deadline. A timeout fails the operation instead of starting a backend with unconfirmed routes. Because NetworkExtension cannot cancel that request, the timed-out adapter refuses further starts; recovery requires ending the provider session. Duplicate or late callbacks cannot resume an operation twice. A backend configuration error during an update stops the tunnel instead of reporting success with inconsistent routes and peers; transactional rollback remains future work.
 
 The package's `WireGuardKit` target treats warnings as errors. The application targets still have legacy UI and Keychain deprecation warnings; a project-wide warnings-as-errors gate is pending. Lifecycle unit tests cover callback races, operation ordering, timeouts, backend errors, stale network events, mobile pause/resume, and cleanup. These tests use platform substitutes and do not replace signed tunnel and device testing.
+
+## Go bridge ABI
+
+`Sources/WireGuardKitGo/wireguard.h` defines ABI version 2, including nullability, ownership, threading, and error contracts. Rebuild the XCFramework and all consumers together. Handles use fixed-width integers and are never reused within a process. Device operations return zero on success or a negative Darwin errno; start returns a nonnegative handle. `wgBumpSockets` reports that a retry worker was accepted, with final asynchronous failure reported through logging. Stop cancels and joins that worker.
+
+`wgGetConfig(handle, &settings)` now returns a status separately from its owned string. Release it and the result of `wgVersion()` with `wgFreeString`. Swift callers can use `getRuntimeConfigurationResult` to receive the backend error; the existing `getRuntimeConfiguration` maps errors to `nil`. Logger callbacks must not synchronously call back into the bridge. Full configuration snapshots always replace peers, including when the new list is empty.
 
 ## WireGuardKit integration
 

@@ -20,11 +20,11 @@ struct AdapterDependencies: Sendable {
     var reasserting: @Sendable (Bool) -> Void
     var cancelTunnel: @Sendable (Error) -> Void
     var start: @Sendable (String) throws -> Int32
-    var stop: @Sendable (Int32) -> Void
+    var stop: @Sendable (Int32) throws -> Void
     var update: @Sendable (Int32, String) -> Int64
-    var bumpSockets: @Sendable (Int32) -> Void
-    var disableRoaming: @Sendable (Int32) -> Void
-    var runtimeConfiguration: @Sendable (Int32) -> String?
+    var bumpSockets: @Sendable (Int32) throws -> Void
+    var disableRoaming: @Sendable (Int32) throws -> Void
+    var runtimeConfiguration: @Sendable (Int32) throws -> String
     var timeoutNanoseconds: UInt64 = 5_000_000_000
     var monitor: @Sendable (@escaping @Sendable (AdapterPathUpdate) -> Void) -> (@Sendable () -> Void) = { callback in
         let monitor = NWPathMonitor()
@@ -79,18 +79,24 @@ actor TunnelLifecycle {
     func stop() -> WireGuardAdapterError? {
         guard phase != .stopped else { return .invalidState }
         phase = .stopping
-        shutdown()
-        return nil
+        return shutdown()
     }
 
-    func shutdown() {
+    func shutdown() -> WireGuardAdapterError? {
         cancelMonitor?()
         cancelMonitor = nil
         monitorID = nil
-        if let handle { dependencies.stop(handle) }
+        var failure: WireGuardAdapterError?
+        if let handle {
+            do { try dependencies.stop(handle) } catch {
+                failure = adapterError(error)
+                log(.error, "Backend shutdown failed: \(error)")
+            }
+        }
         handle = nil
         generator = nil
         phase = .stopped
+        return failure
     }
 
     func update(_ configuration: TunnelConfiguration) async -> WireGuardAdapterError? {
@@ -99,9 +105,11 @@ actor TunnelLifecycle {
         phase = .updating
         dependencies.reasserting(true)
         defer { dependencies.reasserting(false) }
+        var settingsApplied = false
         do {
             let updated = try await makeGenerator(configuration)
             try await apply(updated)
+            settingsApplied = true
             if let handle {
                 let (config, results) = await DNSResolver.run { updated.uapiConfiguration() }
                 logResolution(results)
@@ -112,13 +120,13 @@ actor TunnelLifecycle {
                     dependencies.cancelTunnel(error)
                     return error
                 }
-                dependencies.disableRoaming(handle)
+                try dependencies.disableRoaming(handle)
             }
             generator = updated
             phase = previousPhase
             return nil
         } catch {
-            if settingsUncertain {
+            if settingsUncertain || settingsApplied {
                 fail()
                 dependencies.cancelTunnel(error)
             } else {
@@ -128,9 +136,10 @@ actor TunnelLifecycle {
         }
     }
 
-    func runtimeConfiguration() -> String? {
-        guard phase == .running, let handle else { return nil }
-        return dependencies.runtimeConfiguration(handle)
+    func runtimeConfiguration() -> Result<String, WireGuardAdapterError> {
+        guard phase == .running, let handle else { return .failure(.invalidState) }
+        do { return .success(try dependencies.runtimeConfiguration(handle)) }
+        catch { return .failure(adapterError(error)) }
     }
 
     private func apply(_ generator: PacketTunnelSettingsGenerator) async throws {
@@ -176,45 +185,51 @@ actor TunnelLifecycle {
     private func pathChanged(_ path: AdapterPathUpdate, id: UUID) async {
         guard monitorID == id else { return }
         log(.verbose, "Network change: \(path.description)")
-        if dependencies.pathBehavior == .bumpSockets {
-            if phase == .running, let handle { dependencies.bumpSockets(handle) }
-            return
-        }
-        guard let generator else { return }
-        if phase == .running, let handle {
-            if path.satisfiable {
-                let (config, results) = await DNSResolver.run { generator.endpointUapiConfiguration() }
-                logResolution(results)
-                let code = dependencies.update(handle, config)
-                guard code == 0 else {
-                    fail()
-                    dependencies.cancelTunnel(WireGuardAdapterError.updateWireGuardBackend(code))
-                    return
+        do {
+            if dependencies.pathBehavior == .bumpSockets {
+                if phase == .running, let handle { try dependencies.bumpSockets(handle) }
+                return
+            }
+            guard let generator else { return }
+            if phase == .running, let handle {
+                if path.satisfiable {
+                    let (config, results) = await DNSResolver.run { generator.endpointUapiConfiguration() }
+                    logResolution(results)
+                    let code = dependencies.update(handle, config)
+                    guard code == 0 else {
+                        fail()
+                        dependencies.cancelTunnel(WireGuardAdapterError.updateWireGuardBackend(code))
+                        return
+                    }
+                    try dependencies.disableRoaming(handle)
+                    try dependencies.bumpSockets(handle)
+                } else {
+                    try dependencies.stop(handle)
+                    self.handle = nil
+                    phase = .paused
                 }
-                dependencies.disableRoaming(handle)
-                dependencies.bumpSockets(handle)
-            } else {
-                dependencies.stop(handle)
-                self.handle = nil
-                phase = .paused
+            } else if phase == .paused && path.satisfiable {
+                phase = .starting
+                do {
+                    try await apply(generator)
+                    let (config, results) = await DNSResolver.run { generator.uapiConfiguration() }
+                    logResolution(results)
+                    handle = try dependencies.start(config)
+                    phase = .running
+                } catch {
+                    log(.error, "Failed to resume backend: \(error.localizedDescription)")
+                    fail()
+                    dependencies.cancelTunnel(error)
+                }
             }
-        } else if phase == .paused && path.satisfiable {
-            phase = .starting
-            do {
-                try await apply(generator)
-                let (config, results) = await DNSResolver.run { generator.uapiConfiguration() }
-                logResolution(results)
-                handle = try dependencies.start(config)
-                phase = .running
-            } catch {
-                log(.error, "Failed to resume backend: \(error.localizedDescription)")
-                fail()
-                dependencies.cancelTunnel(error)
-            }
+        } catch {
+            log(.error, "Network change failed: \(error)")
+            fail()
+            dependencies.cancelTunnel(error)
         }
     }
 
-    private func fail() { shutdown(); phase = .failed }
+    private func fail() { _ = shutdown(); phase = .failed }
     private func adapterError(_ error: Error) -> WireGuardAdapterError { error as? WireGuardAdapterError ?? .unexpected(error) }
 
     private func logResolution(_ results: [EndpointResolutionResult?]) {

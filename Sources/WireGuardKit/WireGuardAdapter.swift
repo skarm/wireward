@@ -19,6 +19,7 @@ public enum WireGuardAdapterError: Error {
     case providerUnavailable
     case startWireGuardBackend(Int32)
     case updateWireGuardBackend(Int64)
+    case backendOperation(String, Int64)
     case unexpected(Error)
 }
 
@@ -45,21 +46,28 @@ public final class WireGuardAdapter: Sendable {
                 let handle = wgTurnOn(configuration, fd)
                 guard handle >= 0 else { throw WireGuardAdapterError.startWireGuardBackend(handle) }
                 #if os(iOS)
-                wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+                do {
+                    try Self.check(wgDisableSomeRoamingForBrokenMobileSemantics(handle), operation: "disableRoaming")
+                } catch {
+                    _ = wgTurnOff(handle)
+                    throw error
+                }
                 #endif
                 return handle
             },
-            stop: { wgTurnOff($0) },
+            stop: { try Self.check(wgTurnOff($0), operation: "stop") },
             update: { wgSetConfig($0, $1) },
-            bumpSockets: { wgBumpSockets($0) },
+            bumpSockets: { try Self.check(wgBumpSockets($0), operation: "bumpSockets") },
             disableRoaming: { handle in
                 #if os(iOS)
-                wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+                try Self.check(wgDisableSomeRoamingForBrokenMobileSemantics(handle), operation: "disableRoaming")
                 #endif
             },
             runtimeConfiguration: { handle in
-                guard let value = wgGetConfig(handle) else { return nil }
-                defer { free(value) }
+                var value: UnsafeMutablePointer<CChar>?
+                try Self.check(wgGetConfig(handle, &value), operation: "getConfig")
+                guard let value else { throw WireGuardAdapterError.backendOperation("getConfig", -Int64(EIO)) }
+                defer { wgFreeString(value) }
                 return String(cString: value)
             })
         self.operations = AsyncOperationQueue()
@@ -76,7 +84,7 @@ public final class WireGuardAdapter: Sendable {
 
     deinit {
         let lifecycle = lifecycle
-        operations.submit { await lifecycle.shutdown() }
+        operations.submit { _ = await lifecycle.shutdown() }
         operations.finish()
         BackendLog.remove(id: loggerID)
     }
@@ -100,19 +108,29 @@ public final class WireGuardAdapter: Sendable {
 
     public func getRuntimeConfiguration(completionHandler: @escaping @Sendable (String?) -> Void) {
         let lifecycle = lifecycle
+        operations.submit { completionHandler(try? await lifecycle.runtimeConfiguration().get()) }
+    }
+
+    /// Returns the backend error as well as the configuration; the legacy method maps errors to nil.
+    public func getRuntimeConfigurationResult(completionHandler: @escaping @Sendable (Result<String, WireGuardAdapterError>) -> Void) {
+        let lifecycle = lifecycle
         operations.submit { completionHandler(await lifecycle.runtimeConfiguration()) }
+    }
+
+    private static func check(_ code: Int64, operation: String) throws {
+        guard code == 0 else { throw WireGuardAdapterError.backendOperation(operation, code) }
     }
 
     /// Tunnel device file descriptor.
     private static var tunnelFileDescriptor: Int32? {
-        var ctlInfo = ctl_info()
+        var ctlInfo = wg_ctl_info()
         withUnsafeMutablePointer(to: &ctlInfo.ctl_name) {
             $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: $0.pointee)) {
                 _ = strcpy($0, "com.apple.net.utun_control")
             }
         }
         for fd: Int32 in 0...1024 {
-            var addr = sockaddr_ctl()
+            var addr = wg_sockaddr_ctl()
             var ret: Int32 = -1
             var len = socklen_t(MemoryLayout.size(ofValue: addr))
             withUnsafeMutablePointer(to: &addr) {
@@ -124,7 +142,7 @@ public final class WireGuardAdapter: Sendable {
                 continue
             }
             if ctlInfo.ctl_id == 0 {
-                ret = ioctl(fd, CTLIOCGINFO, &ctlInfo)
+                ret = ioctl(fd, WG_CTLIOCGINFO, &ctlInfo)
                 if ret != 0 {
                     continue
                 }
@@ -138,9 +156,9 @@ public final class WireGuardAdapter: Sendable {
 
     /// Returns a WireGuard version.
     static var backendVersion: String {
-        guard let ver = wgVersion() else { return "unknown" }
+        let ver = wgVersion()
         let str = String(cString: ver)
-        free(UnsafeMutableRawPointer(mutating: ver))
+        wgFreeString(ver)
         return str
     }
 
@@ -194,7 +212,7 @@ private enum BackendLog {
     static let current = LockedValue<Registration?>(nil)
     static let registerCallback: Void = {
         wgSetLogger(nil) { _, level, message in
-            guard let message, let handler = current.withLock({ $0?.handler }) else { return }
+            guard let handler = current.withLock({ $0?.handler }) else { return }
             handler(WireGuardLogLevel(rawValue: level) ?? .verbose, String(cString: message).trimmingCharacters(in: .newlines))
         }
     }()

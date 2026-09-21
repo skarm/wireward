@@ -47,9 +47,8 @@ final class PacketTunnelSettingsGenerator: Sendable {
         if let listenPort = tunnelConfiguration.interface.listenPort {
             wgSettings.append("listen_port=\(listenPort)\n")
         }
-        if !tunnelConfiguration.peers.isEmpty {
-            wgSettings.append("replace_peers=true\n")
-        }
+        // This is a complete snapshot, including an intentionally empty peer list.
+        wgSettings.append("replace_peers=true\n")
         assert(tunnelConfiguration.peers.count == resolvedEndpoints.count)
         for (peer, resolvedEndpoint) in zip(self.tunnelConfiguration.peers, self.resolvedEndpoints) {
             wgSettings.append("public_key=\(peer.publicKey.hexKey)\n")

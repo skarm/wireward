@@ -16,7 +16,7 @@ export GOTOOLCHAIN := local
 export GOWORK := off
 export GOFLAGS :=
 
-BRIDGE_INPUTS := go.mod go.sum api-apple.go wireguard.h module.modulemap \
+BRIDGE_INPUTS := go.mod go.sum $(wildcard *.go) wireguard.h module.modulemap \
 	goruntime-boottime-over-monotonic.diff Makefile $(wildcard build-bridge/*.go) \
 	../../.go-version ../../.xcode-version
 HOST_GO = /usr/bin/env -u GOROOT -u GOOS -u GOARCH -u GOEXPERIMENT \

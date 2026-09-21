@@ -75,7 +75,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 errorNotifier.notify(PacketTunnelProviderError.couldNotSetNetworkSettings)
                 completionHandler(PacketTunnelProviderError.couldNotSetNetworkSettings)
 
-            case .invalidState, .updateWireGuardBackend, .unexpected:
+            case .invalidState, .updateWireGuardBackend, .backendOperation, .unexpected:
                 wg_log(.error, message: "Starting tunnel failed: \(adapterError)")
                 errorNotifier.notify(PacketTunnelProviderError.couldNotStartBackend)
                 completionHandler(PacketTunnelProviderError.couldNotStartBackend)

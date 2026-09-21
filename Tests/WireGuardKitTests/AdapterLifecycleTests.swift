@@ -258,6 +258,32 @@ final class AdapterLifecycleTests: XCTestCase {
         XCTAssertEqual(final, .stopped)
     }
 
+    func testBackendReadAndStopErrorsReachCaller() async throws {
+        let fake = FakeAdapter()
+        var dependencies = fake.dependencies()
+        dependencies.runtimeConfiguration = { _ in throw WireGuardAdapterError.backendOperation("getConfig", -9) }
+        dependencies.stop = { _ in throw WireGuardAdapterError.backendOperation("stop", -9) }
+        let adapter = WireGuardAdapter(dependencies: dependencies)
+        let started = expectation(description: "started")
+        adapter.start(tunnelConfiguration: try configuration()) { error in XCTAssertNil(error); started.fulfill() }
+        await fulfillment(of: [fake.requested[0]], timeout: 1)
+        fake.takeCallback()(nil)
+        await fulfillment(of: [started], timeout: 1)
+        let read = expectation(description: "read failed")
+        adapter.getRuntimeConfigurationResult { result in
+            guard case .failure(.backendOperation("getConfig", -9)) = result else { XCTFail("lost read error"); read.fulfill(); return }
+            read.fulfill()
+        }
+        let stopped = expectation(description: "stop failed")
+        adapter.stop { error in
+            guard case .backendOperation("stop", -9)? = error else { XCTFail("lost stop error"); stopped.fulfill(); return }
+            stopped.fulfill()
+        }
+        await fulfillment(of: [read, stopped], timeout: 1)
+        let state = await adapter.lifecycleState
+        XCTAssertEqual(state, .stopped)
+    }
+
     func testCallbackWaitCancellationWinsOverLateCompletion() async throws {
         let started = expectation(description: "callback installed")
         let callback = LockedValue<(@Sendable (Error?) -> Void)?>(nil)

@@ -1,27 +1,26 @@
 /* SPDX-License-Identifier: MIT
- *
  * Copyright (C) 2018-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
  */
 
 package main
 
 // #include <stdlib.h>
-// #include <sys/types.h>
-// static void callLogger(void *func, void *ctx, int level, const char *msg)
+// #include <stdint.h>
+// typedef void (*logger_fn_t)(void *, int32_t, const char *);
+// static void callLogger(logger_fn_t fn, void *ctx, int32_t level, const char *msg)
 // {
-// 	((void(*)(void *, int, const char *))func)(ctx, level, msg);
+//     fn(ctx, level, msg);
 // }
 import "C"
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"strings"
-	"time"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -30,177 +29,108 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-var loggerFunc unsafe.Pointer
-var loggerCtx unsafe.Pointer
-
-type CLogger int
-
-func cstring(s string) *C.char {
-	b, err := unix.BytePtrFromString(s)
-	if err != nil {
-		b := [1]C.char{}
-		return &b[0]
-	}
-	return (*C.char)(unsafe.Pointer(b))
+var loggerState struct {
+	sync.RWMutex
+	fn      C.logger_fn_t
+	context unsafe.Pointer
 }
 
-func (l CLogger) Printf(format string, args ...interface{}) {
-	if uintptr(loggerFunc) == 0 {
+type CLogger int32
+
+func (l CLogger) Printf(format string, args ...any) {
+	loggerState.RLock()
+	defer loggerState.RUnlock()
+	if loggerState.fn == nil {
 		return
 	}
-	C.callLogger(loggerFunc, loggerCtx, C.int(l), cstring(fmt.Sprintf(format, args...)))
+	message := C.CString(fmt.Sprintf(format, args...))
+	defer C.free(unsafe.Pointer(message))
+	C.callLogger(loggerState.fn, loggerState.context, C.int32_t(l), message)
 }
-
-type tunnelHandle struct {
-	*device.Device
-	*device.Logger
-}
-
-var tunnelHandles = make(map[int32]tunnelHandle)
 
 func init() {
-	signals := make(chan os.Signal)
+	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, unix.SIGUSR2)
 	go func() {
-		buf := make([]byte, os.Getpagesize())
-		for {
-			select {
-			case <-signals:
-				n := runtime.Stack(buf, true)
-				buf[n] = 0
-				if uintptr(loggerFunc) != 0 {
-					C.callLogger(loggerFunc, loggerCtx, 0, (*C.char)(unsafe.Pointer(&buf[0])))
-				}
-			}
+		for range signals {
+			CLogger(0).Printf("%s", captureStacks(runtime.Stack))
 		}
 	}()
 }
 
 //export wgSetLogger
-func wgSetLogger(context, loggerFn uintptr) {
-	loggerCtx = unsafe.Pointer(context)
-	loggerFunc = unsafe.Pointer(loggerFn)
+func wgSetLogger(context unsafe.Pointer, loggerFn C.logger_fn_t) {
+	// Returning guarantees no callback still uses the previous context.
+	loggerState.Lock()
+	defer loggerState.Unlock()
+	loggerState.context, loggerState.fn = context, loggerFn
 }
 
 //export wgTurnOn
-func wgTurnOn(settings *C.char, tunFd int32) int32 {
-	logger := &device.Logger{
-		Verbosef: CLogger(0).Printf,
-		Errorf:   CLogger(1).Printf,
+func wgTurnOn(settings *C.char, tunFd C.int32_t) C.int32_t {
+	if settings == nil {
+		return -C.int32_t(unix.EINVAL)
 	}
-	dupTunFd, err := unix.Dup(int(tunFd))
+	if tunFd < 0 {
+		return -C.int32_t(unix.EBADF)
+	}
+	logger := &device.Logger{Verbosef: CLogger(0).Printf, Errorf: CLogger(1).Printf}
+	dupFd, err := unix.FcntlInt(uintptr(tunFd), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
-		logger.Errorf("Unable to dup tun fd: %v", err)
-		return -1
+		return C.int32_t(errorCode(err))
 	}
-
-	err = unix.SetNonblock(dupTunFd, true)
+	if err = unix.SetNonblock(dupFd, true); err != nil {
+		unix.Close(dupFd)
+		return C.int32_t(errorCode(err))
+	}
+	// The pinned Darwin CreateTUNFromFile takes ownership on success AND failure.
+	// Closing dupFd here again could close an unrelated descriptor reused by the OS.
+	tunnel, err := tun.CreateTUNFromFile(os.NewFile(uintptr(dupFd), "/dev/tun"), 0)
 	if err != nil {
-		logger.Errorf("Unable to set tun fd as non blocking: %v", err)
-		unix.Close(dupTunFd)
-		return -1
+		return C.int32_t(errorCode(err))
 	}
-	tun, err := tun.CreateTUNFromFile(os.NewFile(uintptr(dupTunFd), "/dev/tun"), 0)
-	if err != nil {
-		logger.Errorf("Unable to create new tun device from fd: %v", err)
-		unix.Close(dupTunFd)
-		return -1
-	}
-	logger.Verbosef("Attaching to interface")
-	dev := device.NewDevice(tun, conn.NewStdNetBind(), logger)
-
-	err = dev.IpcSet(C.GoString(settings))
-	if err != nil {
-		logger.Errorf("Unable to set IPC settings: %v", err)
-		unix.Close(dupTunFd)
-		return -1
-	}
-
-	dev.Up()
-	logger.Verbosef("Device started")
-
-	var i int32
-	for i = 0; i < math.MaxInt32; i++ {
-		if _, exists := tunnelHandles[i]; !exists {
-			break
-		}
-	}
-	if i == math.MaxInt32 {
-		unix.Close(dupTunFd)
-		return -1
-	}
-	tunnelHandles[i] = tunnelHandle{dev, logger}
-	return i
+	dev := device.NewDevice(tunnel, conn.NewStdNetBind(), logger)
+	return C.int32_t(tunnels.start(dev, logger, C.GoString(settings)))
 }
 
 //export wgTurnOff
-func wgTurnOff(tunnelHandle int32) {
-	dev, ok := tunnelHandles[tunnelHandle]
-	if !ok {
-		return
-	}
-	delete(tunnelHandles, tunnelHandle)
-	dev.Close()
-}
+func wgTurnOff(handle C.int32_t) C.int64_t { return C.int64_t(tunnels.stop(int32(handle))) }
 
 //export wgSetConfig
-func wgSetConfig(tunnelHandle int32, settings *C.char) int64 {
-	dev, ok := tunnelHandles[tunnelHandle]
-	if !ok {
-		return 0
+func wgSetConfig(handle C.int32_t, settings *C.char) C.int64_t {
+	if settings == nil {
+		return -C.int64_t(unix.EINVAL)
 	}
-	err := dev.IpcSet(C.GoString(settings))
-	if err != nil {
-		dev.Errorf("Unable to set IPC settings: %v", err)
-		if ipcErr, ok := err.(*device.IPCError); ok {
-			return ipcErr.ErrorCode()
-		}
-		return -1
-	}
-	return 0
+	return C.int64_t(tunnels.withDevice(int32(handle), func(dev backendDevice) error { return dev.IpcSet(C.GoString(settings)) }))
 }
 
 //export wgGetConfig
-func wgGetConfig(tunnelHandle int32) *C.char {
-	device, ok := tunnelHandles[tunnelHandle]
-	if !ok {
-		return nil
+func wgGetConfig(handle C.int32_t, settings **C.char) C.int64_t {
+	if settings == nil {
+		return -C.int64_t(unix.EINVAL)
 	}
-	settings, err := device.IpcGet()
-	if err != nil {
-		return nil
+	*settings = nil
+	var value string
+	code := tunnels.withDevice(int32(handle), func(dev backendDevice) (err error) { value, err = dev.IpcGet(); return })
+	if code == 0 {
+		*settings = C.CString(value)
 	}
-	return C.CString(settings)
+	return C.int64_t(code)
 }
 
 //export wgBumpSockets
-func wgBumpSockets(tunnelHandle int32) {
-	dev, ok := tunnelHandles[tunnelHandle]
-	if !ok {
-		return
-	}
-	go func() {
-		for i := 0; i < 10; i++ {
-			err := dev.BindUpdate()
-			if err == nil {
-				dev.SendKeepalivesToPeersWithCurrentKeypair()
-				return
-			}
-			dev.Errorf("Unable to update bind, try %d: %v", i+1, err)
-			time.Sleep(time.Second / 2)
-		}
-		dev.Errorf("Gave up trying to update bind; tunnel is likely dysfunctional")
-	}()
-}
+func wgBumpSockets(handle C.int32_t) C.int64_t { return C.int64_t(tunnels.bump(int32(handle))) }
 
 //export wgDisableSomeRoamingForBrokenMobileSemantics
-func wgDisableSomeRoamingForBrokenMobileSemantics(tunnelHandle int32) {
-	dev, ok := tunnelHandles[tunnelHandle]
-	if !ok {
-		return
-	}
-	dev.DisableSomeRoamingForBrokenMobileSemantics()
+func wgDisableSomeRoamingForBrokenMobileSemantics(handle C.int32_t) C.int64_t {
+	return C.int64_t(tunnels.withDevice(int32(handle), func(dev backendDevice) error {
+		dev.DisableSomeRoamingForBrokenMobileSemantics()
+		return nil
+	}))
 }
+
+//export wgFreeString
+func wgFreeString(value *C.char) { C.free(unsafe.Pointer(value)) }
 
 //export wgVersion
 func wgVersion() *C.char {
