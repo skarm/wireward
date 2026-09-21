@@ -40,6 +40,33 @@ $ open WireGuard.xcodeproj
 
 - Select the `WireGuardiOS` or `WireGuardmacOS` scheme, configure signing for the application and Network Extension targets, and build.
 
+## Tests
+
+On Apple silicon, build the macOS bridge and run the package tests:
+
+```sh
+xcodebuild -project WireGuard.xcodeproj -scheme WireGuardmacOS -configuration Debug \
+  -sdk macosx -destination 'generic/platform=macOS' -derivedDataPath build/macos \
+  CODE_SIGNING_ALLOWED=NO ARCHS=arm64 GO="$(command -v go)" build
+swift test --enable-xctest -Xlinker -Lbuild/macos/Build/Products/Debug
+```
+
+Add `--sanitize thread` to the Swift test command to check synchronization. Run upstream Go tests with the manifest kept read-only:
+
+```sh
+cd Sources/WireGuardKitGo
+GOTOOLCHAIN=local go mod download github.com/google/btree # Upstream netstack test checksum
+GOTOOLCHAIN=local go test -mod=readonly -race ./... golang.zx2c4.com/wireguard/...
+```
+
+## Backend dependencies
+
+The backend is pinned to `wireguard-go/master` commit `ecfc5a8d54462e18e13c72173e2623d16d8e25a0` (2026-05-22). Dependencies were checked on 2026-09-21. `Sources/WireGuardKitGo/go.mod` records WireGuard, `x/sys`, and six indirect dependencies: `x/crypto`, `x/exp`, `x/net`, `x/time`, Wintun, and gVisor.
+
+For optional netstack support, gVisor uses the [Go-compatible branch](https://github.com/google/gvisor#using-go-get), pinned to `501da953ee3803d88004cba68c7cc85098c75dfb`; its Bazel `master` cannot be built with standard Go tooling.
+
+Update these dependencies explicitly, resolve WireGuard `master` and gVisor `go` to exact pseudo-versions, and run the Go tests and both application builds. Keep the manifest and checksums minimal with `go mod tidy`. Release builds use the recorded versions without querying branches.
+
 ## Swift 6 compatibility
 
 `TunnelConfiguration` is now a value type: edit a `var` copy and pass it back explicitly. Keys are immutable final `Sendable` types; `BaseKey` is a protocol. Adapter callbacks are `@Sendable`; app tunnel management and UI delegates are isolated to `MainActor`. Internal target names and bundle identifiers are unchanged.
