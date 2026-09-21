@@ -7,11 +7,19 @@ import os
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
 
-    private lazy var adapter: WireGuardAdapter = {
-        return WireGuardAdapter(with: self) { logLevel, message in
-            wg_log(logLevel.osLogLevel, message: message)
+    // NetworkExtension may enter different callbacks concurrently. Swift lazy
+    // initialization is not synchronized, so construct the adapter under a lock.
+    private let adapterStorage = LockedValue<WireGuardAdapter?>(nil)
+    private var adapter: WireGuardAdapter {
+        adapterStorage.withLock { current in
+            if let current { return current }
+            let adapter = WireGuardAdapter(with: self) { logLevel, message in
+                wg_log(logLevel.osLogLevel, message: message)
+            }
+            current = adapter
+            return adapter
         }
-    }()
+    }
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping @Sendable (Error?) -> Void) {
         let activationAttemptId = options?["activationAttemptId"] as? String
@@ -62,9 +70,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 errorNotifier.notify(PacketTunnelProviderError.couldNotStartBackend)
                 completionHandler(PacketTunnelProviderError.couldNotStartBackend)
 
-            case .invalidState:
-                // Must never happen
-                fatalError()
+            case .networkSettingsTimedOut, .providerUnavailable:
+                wg_log(.error, message: "Starting tunnel failed while applying network settings: \(adapterError)")
+                errorNotifier.notify(PacketTunnelProviderError.couldNotSetNetworkSettings)
+                completionHandler(PacketTunnelProviderError.couldNotSetNetworkSettings)
+
+            case .invalidState, .updateWireGuardBackend, .unexpected:
+                wg_log(.error, message: "Starting tunnel failed: \(adapterError)")
+                errorNotifier.notify(PacketTunnelProviderError.couldNotStartBackend)
+                completionHandler(PacketTunnelProviderError.couldNotStartBackend)
             }
         }
     }

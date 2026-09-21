@@ -11,6 +11,13 @@ extension DNSResolver {
     /// Concurrent queue used for DNS resolutions
     private static let resolverQueue = DispatchQueue(label: "DNSResolverQueue", qos: .default, attributes: .concurrent)
 
+    /// getaddrinfo is blocking; keep it off Swift's cooperative executor.
+    static func run<Value: Sendable>(_ operation: @escaping @Sendable () -> Value) async -> Value {
+        await withCheckedContinuation { continuation in
+            resolverQueue.async { continuation.resume(returning: operation()) }
+        }
+    }
+
     static func resolveSync(endpoints: [Endpoint?]) -> [Result<Endpoint, DNSResolutionError>?] {
         let isAllEndpointsAlreadyResolved = endpoints.allSatisfy { maybeEndpoint -> Bool in
             return maybeEndpoint?.hasHostAsIPAddress() ?? true

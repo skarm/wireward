@@ -637,12 +637,15 @@ class TunnelContainer: NSObject {
             completionHandler(tunnelConfiguration)
             return
         }
-        guard nil != (try? session.sendProviderMessage(Data([ UInt8(0) ]), responseHandler: {
-            guard self.status != .inactive, let data = $0, let base = self.tunnelConfiguration, let settings = String(data: data, encoding: .utf8) else {
-                completionHandler(self.tunnelConfiguration)
-                return
+        guard nil != (try? session.sendProviderMessage(Data([ UInt8(0) ]), responseHandler: { data in
+            // NetworkExtension does not promise a main-queue response here.
+            Task { @MainActor in
+                guard self.status != .inactive, let data, let base = self.tunnelConfiguration, let settings = String(data: data, encoding: .utf8) else {
+                    completionHandler(self.tunnelConfiguration)
+                    return
+                }
+                completionHandler((try? TunnelConfiguration(fromUapiConfig: settings, basedOn: base)) ?? self.tunnelConfiguration)
             }
-            completionHandler((try? TunnelConfiguration(fromUapiConfig: settings, basedOn: base)) ?? self.tunnelConfiguration)
         })) else {
             completionHandler(tunnelConfiguration)
             return

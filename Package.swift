@@ -17,7 +17,8 @@ let package = Package(
         .testTarget(name: "WireGuardKitTests", dependencies: ["WireGuardKit"]),
         .target(
             name: "WireGuardKit",
-            dependencies: ["WireGuardKitGo", "WireGuardKitC"]
+            dependencies: ["WireGuardKitGo", "WireGuardKitC"],
+            swiftSettings: [.treatAllWarnings(as: .error)]
         ),
         .target(
             name: "WireGuardKitC",

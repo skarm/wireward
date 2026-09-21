@@ -82,6 +82,12 @@ Update these dependencies explicitly, resolve WireGuard `master` and gVisor `go`
 
 `TunnelConfiguration` is now a value type: edit a `var` copy and pass it back explicitly. Keys are immutable final `Sendable` types; `BaseKey` is a protocol. Adapter callbacks are `@Sendable`; app tunnel management and UI delegates are isolated to `MainActor`. Internal target names and bundle identifiers are unchanged.
 
+`WireGuardAdapter` is a checked `Sendable` type. An actor owns its lifecycle state, and a single asynchronous operation queue preserves submission order across DNS resolution and NetworkExtension callbacks. Read `await adapter.lifecycleState` for the current phase. The existing callback API remains available; callbacks do not run on the main actor unless the caller explicitly transfers them there.
+
+Applying network settings has a five-second deadline. A timeout fails the operation instead of starting a backend with unconfirmed routes. Because NetworkExtension cannot cancel that request, the timed-out adapter refuses further starts; recovery requires ending the provider session. Duplicate or late callbacks cannot resume an operation twice. A backend configuration error during an update stops the tunnel instead of reporting success with inconsistent routes and peers; transactional rollback remains future work.
+
+The package's `WireGuardKit` target treats warnings as errors. The application targets still have legacy UI and Keychain deprecation warnings; a project-wide warnings-as-errors gate is pending. Lifecycle unit tests cover callback races, operation ordering, timeouts, backend errors, stale network events, mobile pause/resume, and cleanup. These tests use platform substitutes and do not replace signed tunnel and device testing.
+
 ## WireGuardKit integration
 
 Clone [skarm/wireward](https://github.com/skarm/wireward), build the XCFramework with the command above, and add this checkout as a **local Swift package** in Xcode. Link the `WireGuardKit` product to your application and Network Extension targets. The package's binary target supplies the Go library and headers for the selected platform; no External Build System target or manual library search path is required.
