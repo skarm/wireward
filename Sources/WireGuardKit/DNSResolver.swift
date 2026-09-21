@@ -4,11 +4,7 @@
 import Network
 import Foundation
 
-enum DNSResolver {}
-
-extension DNSResolver {
-
-    /// Concurrent queue used for DNS resolutions
+enum DNSResolver {
     private static let resolverQueue = DispatchQueue(label: "DNSResolverQueue", qos: .default, attributes: .concurrent)
 
     /// getaddrinfo is blocking; keep it off Swift's cooperative executor.
@@ -19,132 +15,81 @@ extension DNSResolver {
     }
 
     static func resolveSync(endpoints: [Endpoint?]) -> [Result<Endpoint, DNSResolutionError>?] {
-        let isAllEndpointsAlreadyResolved = endpoints.allSatisfy { maybeEndpoint -> Bool in
-            return maybeEndpoint?.hasHostAsIPAddress() ?? true
+        if endpoints.allSatisfy({ $0?.hasHostAsIPAddress() ?? true }) {
+            return endpoints.map { $0.map { .success($0) } }
         }
-
-        if isAllEndpointsAlreadyResolved {
-            return endpoints.map { endpoint in
-                return endpoint.map { .success($0) }
-            }
-        }
-
-        return endpoints.concurrentMap(queue: resolverQueue) { endpoint -> Result<Endpoint, DNSResolutionError>? in
-            guard let endpoint = endpoint else { return nil }
-
-            if endpoint.hasHostAsIPAddress() {
-                return .success(endpoint)
-            } else {
-                return Result { try DNSResolver.resolveSync(endpoint: endpoint) }
-                    .mapError { error -> DNSResolutionError in
-                        // swiftlint:disable:next force_cast
-                        return error as! DNSResolutionError
-                    }
+        return endpoints.concurrentMap(queue: resolverQueue) { endpoint in
+            endpoint.map { endpoint in
+                do throws(DNSResolutionError) { return .success(try resolveSync(endpoint: endpoint)) }
+                catch { return .failure(error) }
             }
         }
     }
 
-    private static func resolveSync(endpoint: Endpoint) throws -> Endpoint {
-        guard case .name(let name, _) = endpoint.host else {
-            return endpoint
-        }
+    static func resolveSync(endpoint: Endpoint) throws(DNSResolutionError) -> Endpoint {
+        guard case .name(let name, _) = endpoint.host else { return endpoint }
+        // Keep the existing IPv4 preference; AI_ALL also requests original A
+        // records on DNS64 networks. Reachability policy is a separate concern.
+        return try lookup(name: name, endpoint: endpoint, flags: AI_ALL, preferIPv4: true)
+    }
 
+    static func lookup(name: String, endpoint: Endpoint, flags: Int32, preferIPv4: Bool) throws(DNSResolutionError) -> Endpoint {
+        guard !name.isEmpty, !name.utf8.contains(0) else {
+            throw DNSResolutionError(errorCode: EAI_NONAME, address: name)
+        }
         var hints = addrinfo()
-        hints.ai_flags = AI_ALL // We set this to ALL so that we get v4 addresses even on DNS64 networks
+        hints.ai_flags = flags
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_DGRAM
         hints.ai_protocol = IPPROTO_UDP
+        var result: UnsafeMutablePointer<addrinfo>?
+        defer { if let result { freeaddrinfo(result) } }
+        let code = getaddrinfo(name, "\(endpoint.port)", &hints, &result)
+        guard code == 0 else { throw DNSResolutionError(errorCode: code, address: name) }
+        return try selectAddress(from: result, endpoint: endpoint, address: name, preferIPv4: preferIPv4)
+    }
 
-        var resultPointer: UnsafeMutablePointer<addrinfo>?
-        defer {
-            resultPointer.flatMap { freeaddrinfo($0) }
-        }
-
-        let errorCode = getaddrinfo(name, "\(endpoint.port)", &hints, &resultPointer)
-        if errorCode != 0 {
-            throw DNSResolutionError(errorCode: errorCode, address: name)
-        }
-
-        var ipv4Address: IPv4Address?
-        var ipv6Address: IPv6Address?
-
-        var next: UnsafeMutablePointer<addrinfo>? = resultPointer
-        let iterator = AnyIterator { () -> addrinfo? in
-            let result = next?.pointee
-            next = result?.ai_next
-            return result
-        }
-
-        for addrInfo in iterator {
-            if let maybeIpv4Address = IPv4Address(addrInfo: addrInfo) {
-                ipv4Address = maybeIpv4Address
-                break // If we found an IPv4 address, we can stop
-            } else if let maybeIpv6Address = IPv6Address(addrInfo: addrInfo) {
-                ipv6Address = maybeIpv6Address
-                continue // If we already have an IPv6 address, we can skip this one
+    /// Ignore unsupported/short records and return an error for an empty usable
+    /// result. A successful getaddrinfo status does not justify force-unwrapping.
+    static func selectAddress(from head: UnsafeMutablePointer<addrinfo>?, endpoint: Endpoint,
+                              address: String, preferIPv4: Bool) throws(DNSResolutionError) -> Endpoint {
+        var next = head
+        var firstIPv6: Endpoint?
+        while let current = next {
+            let info = current.pointee
+            next = info.ai_next
+            if let ipv4 = IPv4Address(addrInfo: info) {
+                return Endpoint(host: .ipv4(ipv4), port: endpoint.port)
+            }
+            if let ipv6 = IPv6Address(addrInfo: info) {
+                let resolved = Endpoint(host: .ipv6(ipv6), port: endpoint.port)
+                if !preferIPv4 { return resolved }
+                if firstIPv6 == nil { firstIPv6 = resolved }
             }
         }
-
-        // We prefer an IPv4 address over an IPv6 address
-        if let ipv4Address = ipv4Address {
-            return Endpoint(host: .ipv4(ipv4Address), port: endpoint.port)
-        } else if let ipv6Address = ipv6Address {
-            return Endpoint(host: .ipv6(ipv6Address), port: endpoint.port)
-        } else {
-            // Must never happen
-            fatalError()
-        }
+        if let firstIPv6 { return firstIPv6 }
+        throw DNSResolutionError(errorCode: EAI_NONAME, address: address)
     }
 }
 
 extension Endpoint {
-    func withReresolvedIP() throws -> Endpoint {
+    func withReresolvedIP() throws(DNSResolutionError) -> Endpoint {
         #if os(iOS)
-        let hostname: String
+        let name: String
         switch host {
-        case .name(let name, _):
-            hostname = name
-        case .ipv4(let address):
-            hostname = "\(address)"
-        case .ipv6(let address):
-            hostname = "\(address)"
-        @unknown default:
-            fatalError()
+        case .name(let hostname, _): name = hostname
+        case .ipv4(let address): name = "\(address)"
+        case .ipv6(let address): name = "\(address)"
+        @unknown default: throw DNSResolutionError(errorCode: EAI_FAMILY, address: "unsupported endpoint")
         }
-
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_DGRAM
-        hints.ai_protocol = IPPROTO_UDP
-        hints.ai_flags = 0 // We set this to zero so that we actually resolve this using DNS64
-
-        var result: UnsafeMutablePointer<addrinfo>?
-        defer {
-            result.flatMap { freeaddrinfo($0) }
-        }
-
-        let errorCode = getaddrinfo(hostname, "\(self.port)", &hints, &result)
-        if errorCode != 0 {
-            throw DNSResolutionError(errorCode: errorCode, address: hostname)
-        }
-
-        let addrInfo = result!.pointee
-        if let ipv4Address = IPv4Address(addrInfo: addrInfo) {
-            return Endpoint(host: .ipv4(ipv4Address), port: port)
-        } else if let ipv6Address = IPv6Address(addrInfo: addrInfo) {
-            return Endpoint(host: .ipv6(ipv6Address), port: port)
-        } else {
-            fatalError()
-        }
-        #elseif os(macOS)
-        return self
+        // Preserve DNS64 synthesis and the system's order of usable addresses.
+        return try DNSResolver.lookup(name: name, endpoint: self, flags: 0, preferIPv4: false)
         #else
-        #error("Unimplemented")
+        return self
         #endif
     }
 }
 
-/// An error type describing DNS resolution error
 public struct DNSResolutionError: LocalizedError {
     public let errorCode: Int32
     public let address: String
@@ -155,6 +100,7 @@ public struct DNSResolutionError: LocalizedError {
     }
 
     public var errorDescription: String? {
-        return String(cString: gai_strerror(errorCode))
+        guard let message = gai_strerror(errorCode) else { return "DNS resolution failed (\(errorCode))." }
+        return String(cString: message)
     }
 }

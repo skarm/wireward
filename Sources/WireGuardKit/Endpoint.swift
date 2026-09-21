@@ -62,6 +62,7 @@ extension Endpoint {
             startOfPort = string.index(after: endOfHost)
             hostString = String(string[string.startIndex ..< endOfHost])
         }
+        guard !hostString.isEmpty else { return nil }
         guard let endpointPort = NWEndpoint.Port(String(string[startOfPort ..< string.endIndex])) else { return nil }
         let invalidCharacterIndex = hostString.unicodeScalars.firstIndex { char in
             return !CharacterSet.urlHostAllowed.contains(char)

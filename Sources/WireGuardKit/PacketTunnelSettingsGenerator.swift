@@ -173,10 +173,7 @@ final class PacketTunnelSettingsGenerator: Sendable {
     }
 
     private class func reresolveEndpoint(endpoint: Endpoint) -> EndpointResolutionResult {
-        return Result { (endpoint, try endpoint.withReresolvedIP()) }
-            .mapError { error -> DNSResolutionError in
-                // swiftlint:disable:next force_cast
-                return error as! DNSResolutionError
-            }
+        do { return .success((endpoint, try endpoint.withReresolvedIP())) }
+        catch { return .failure(error) }
     }
 }
