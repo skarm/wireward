@@ -81,6 +81,7 @@ class TunnelEditViewController: NSViewController {
 
     let tunnelsManager: TunnelsManager
     let tunnel: TunnelContainer?
+    private let initialConfiguration: TunnelConfiguration?
     var onDemandViewModel: ActivateOnDemandViewModel
 
     weak var delegate: TunnelEditViewControllerDelegate?
@@ -92,9 +93,14 @@ class TunnelEditViewController: NSViewController {
     var dnsServersAddedToAllowedIPs: String?
     private var keyGenerationFailure: String?
 
-    init(tunnelsManager: TunnelsManager, tunnel: TunnelContainer?) {
+    init?(tunnelsManager: TunnelsManager, tunnel: TunnelContainer?) {
+        // Existing profiles can outlive their Keychain item. Read once before
+        // opening the editor, then keep that snapshot even if access changes.
+        let configuration = tunnel?.tunnelConfiguration
+        guard tunnel == nil || configuration != nil else { return nil }
         self.tunnelsManager = tunnelsManager
         self.tunnel = tunnel
+        self.initialConfiguration = configuration
         self.onDemandViewModel = tunnel != nil ? ActivateOnDemandViewModel(tunnel: tunnel!) : ActivateOnDemandViewModel()
         super.init(nibName: nil, bundle: nil)
     }
@@ -104,10 +110,9 @@ class TunnelEditViewController: NSViewController {
     }
 
     func populateFields() {
-        if let tunnel = tunnel {
+        if let tunnelConfiguration = initialConfiguration {
             // Editing an existing tunnel
-            let tunnelConfiguration = tunnel.tunnelConfiguration!
-            nameRow.value = tunnel.name
+            nameRow.value = tunnel?.name ?? tunnelConfiguration.name ?? ""
             textView.string = tunnelConfiguration.asWgQuickConfig()
             publicKeyRow.value = tunnelConfiguration.interface.privateKey.publicKey.base64Key
             textView.privateKeyString = tunnelConfiguration.interface.privateKey.base64Key

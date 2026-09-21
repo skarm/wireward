@@ -208,7 +208,11 @@ class TunnelDetailTableViewController: NSViewController {
     @objc func handleEditTunnelAction() {
         PrivateDataConfirmation.confirmAccess(to: tr("macViewPrivateData")) { [weak self] in
             guard let self = self else { return }
-            let tunnelEditVC = TunnelEditViewController(tunnelsManager: self.tunnelsManager, tunnel: self.tunnel)
+            guard let tunnelEditVC = TunnelEditViewController(tunnelsManager: self.tunnelsManager, tunnel: self.tunnel) else {
+                ErrorPresenter.showErrorAlert(title: tr("alertSystemErrorOnModifyTunnelTitle"),
+                                              message: tr("alertTunnelActivationSavedConfigFailureMessage"), from: self)
+                return
+            }
             tunnelEditVC.delegate = self
             self.presentAsSheet(tunnelEditVC)
             self.tunnelEditVC = tunnelEditVC

@@ -62,6 +62,12 @@ make -C Sources/WireGuardKitGo test GO=/absolute/path/to/go
 swift test --enable-xctest
 ```
 
+The macOS editor regression test builds the actual app classes with a separate test entry point. It uses in-memory profiles and does not read saved VPN profiles or Keychain items:
+
+```sh
+python3 Tests/WireGuardAppTests/run-editor-tests.py
+```
+
 The C regression tests check key generation with assertions disabled, RNG failure, and kernel structure layouts against the macOS SDK:
 
 ```sh
@@ -109,6 +115,8 @@ The package's `WireGuardKit` target treats warnings as errors. The application t
 Keychain replacement keeps the previous item until NetworkExtension confirms the new profile was saved. Failed saves restore the in-memory profile and discard only the new item. Removing a profile deletes its Keychain item only after removal succeeds. Legacy inline migration retains the original configuration if Keychain access or saving fails; startup migrations finish before profiles can be edited. Canonical iOS reference migration does not delete the shared item behind the old and new reference values.
 
 Reload errors retain the current tunnel list, and an unchanged persistent reference preserves its cached configuration when Keychain reads are temporarily unavailable. Startup no longer automatically removes profiles or sweeps Keychain items from a snapshot. An interrupted save can therefore leave an unused item; cleanup requires reconciling confirmed references first. The internal `ConfigurationStore` test target verifies commit/rollback ownership with an in-memory store; signed Keychain/NetworkExtension integration testing is still pending.
+
+The macOS editor reports an error when a saved profile's configuration is unavailable and allows retrying after access is restored. Once opened, it uses the accepted configuration snapshot even if access changes.
 
 ## Go bridge ABI
 
