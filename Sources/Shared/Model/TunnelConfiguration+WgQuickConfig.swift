@@ -35,7 +35,7 @@ extension TunnelConfiguration {
         case multipleEntriesForKey(String)
     }
 
-    convenience init(fromWgQuickConfig wgQuickConfig: String, called name: String? = nil) throws {
+    init(fromWgQuickConfig wgQuickConfig: String, called name: String? = nil) throws {
         var interfaceConfiguration: InterfaceConfiguration?
         var peerConfigurations = [PeerConfiguration]()
 

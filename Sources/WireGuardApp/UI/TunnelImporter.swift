@@ -3,24 +3,30 @@
 
 import Foundation
 
+@MainActor
 class TunnelImporter {
-    static func importFromFile(urls: [URL], into tunnelsManager: TunnelsManager, sourceVC: AnyObject?, errorPresenterType: ErrorPresenterProtocol.Type, completionHandler: (() -> Void)? = nil) {
+    @MainActor
+    private final class ImportResults {
+        var configs = [TunnelConfiguration?]()
+        var lastFileImportErrorText: (title: String, message: String)?
+    }
+
+    static func importFromFile(urls: [URL], into tunnelsManager: TunnelsManager, sourceVC: AnyObject?, errorPresenterType: ErrorPresenterProtocol.Type, completionHandler: (@MainActor () -> Void)? = nil) {
         guard !urls.isEmpty else {
             completionHandler?()
             return
         }
         let dispatchGroup = DispatchGroup()
-        var configs = [TunnelConfiguration?]()
-        var lastFileImportErrorText: (title: String, message: String)?
+        let results = ImportResults()
         for url in urls {
             if url.pathExtension.lowercased() == "zip" {
                 dispatchGroup.enter()
                 ZipImporter.importConfigFiles(from: url) { result in
                     switch result {
                     case .failure(let error):
-                        lastFileImportErrorText = error.alertText
+                        results.lastFileImportErrorText = error.alertText
                     case .success(let configsInZip):
-                        configs.append(contentsOf: configsInZip)
+                        results.configs.append(contentsOf: configsInZip)
                     }
                     dispatchGroup.leave()
                 }
@@ -35,11 +41,11 @@ class TunnelImporter {
                     } catch let error {
                         DispatchQueue.main.async {
                             if let cocoaError = error as? CocoaError, cocoaError.isFileError {
-                                lastFileImportErrorText = (title: tr("alertCantOpenInputConfFileTitle"), message: error.localizedDescription)
+                                results.lastFileImportErrorText = (title: tr("alertCantOpenInputConfFileTitle"), message: error.localizedDescription)
                             } else {
-                                lastFileImportErrorText = (title: tr("alertCantOpenInputConfFileTitle"), message: tr(format: "alertCantOpenInputConfFileMessage (%@)", fileName))
+                                results.lastFileImportErrorText = (title: tr("alertCantOpenInputConfFileTitle"), message: tr(format: "alertCantOpenInputConfFileMessage (%@)", fileName))
                             }
-                            configs.append(nil)
+                            results.configs.append(nil)
                             dispatchGroup.leave()
                         }
                         return
@@ -51,37 +57,39 @@ class TunnelImporter {
                     } catch let error {
                         parseError = error
                     }
+                    let importedConfiguration = tunnelConfiguration
+                    let importError = parseError
                     DispatchQueue.main.async {
-                        if parseError != nil {
-                            if let parseError = parseError as? WireGuardAppError {
-                                lastFileImportErrorText = parseError.alertText
+                        if importError != nil {
+                            if let parseError = importError as? WireGuardAppError {
+                                results.lastFileImportErrorText = parseError.alertText
                             } else {
-                                lastFileImportErrorText = (title: tr("alertBadConfigImportTitle"), message: tr(format: "alertBadConfigImportMessage (%@)", fileName))
+                                results.lastFileImportErrorText = (title: tr("alertBadConfigImportTitle"), message: tr(format: "alertBadConfigImportMessage (%@)", fileName))
                             }
                         }
-                        configs.append(tunnelConfiguration)
+                        results.configs.append(importedConfiguration)
                         dispatchGroup.leave()
                     }
                 }
             }
         }
         dispatchGroup.notify(queue: .main) {
-            tunnelsManager.addMultiple(tunnelConfigurations: configs.compactMap { $0 }) { numberSuccessful, lastAddError in
-                if !configs.isEmpty && numberSuccessful == configs.count {
+            tunnelsManager.addMultiple(tunnelConfigurations: results.configs.compactMap { $0 }) { numberSuccessful, lastAddError in
+                if !results.configs.isEmpty && numberSuccessful == results.configs.count {
                     completionHandler?()
                     return
                 }
                 let alertText: (title: String, message: String)?
                 if urls.count == 1 {
-                    if urls.first!.pathExtension.lowercased() == "zip" && !configs.isEmpty {
+                    if urls.first!.pathExtension.lowercased() == "zip" && !results.configs.isEmpty {
                         alertText = (title: tr(format: "alertImportedFromZipTitle (%d)", numberSuccessful),
-                                     message: tr(format: "alertImportedFromZipMessage (%1$d of %2$d)", numberSuccessful, configs.count))
+                                     message: tr(format: "alertImportedFromZipMessage (%1$d of %2$d)", numberSuccessful, results.configs.count))
                     } else {
-                        alertText = lastFileImportErrorText ?? lastAddError?.alertText
+                        alertText = results.lastFileImportErrorText ?? lastAddError?.alertText
                     }
                 } else {
                     alertText = (title: tr(format: "alertImportedFromMultipleFilesTitle (%d)", numberSuccessful),
-                                 message: tr(format: "alertImportedFromMultipleFilesMessage (%1$d of %2$d)", numberSuccessful, configs.count))
+                                 message: tr(format: "alertImportedFromMultipleFilesMessage (%1$d of %2$d)", numberSuccessful, results.configs.count))
                 }
                 if let alertText = alertText {
                     errorPresenterType.showErrorAlert(title: alertText.title, message: alertText.message, from: sourceVC, onPresented: completionHandler)

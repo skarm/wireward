@@ -13,7 +13,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }()
 
-    override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+    override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping @Sendable (Error?) -> Void) {
         let activationAttemptId = options?["activationAttemptId"] as? String
         let errorNotifier = ErrorNotifier(activationAttemptId: activationAttemptId)
 
@@ -29,9 +29,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         // Start the tunnel
-        adapter.start(tunnelConfiguration: tunnelConfiguration) { adapterError in
+        adapter.start(tunnelConfiguration: tunnelConfiguration) { [adapter] adapterError in
             guard let adapterError = adapterError else {
-                let interfaceName = self.adapter.interfaceName ?? "unknown"
+                let interfaceName = adapter.interfaceName ?? "unknown"
 
                 wg_log(.info, message: "Tunnel interface is \(interfaceName)")
 
@@ -69,7 +69,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+    override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping @Sendable () -> Void) {
         wg_log(.info, staticMessage: "Stopping tunnel")
 
         adapter.stop { error in
@@ -89,7 +89,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
+    override func handleAppMessage(_ messageData: Data, completionHandler: (@Sendable (Data?) -> Void)? = nil) {
         guard let completionHandler = completionHandler else { return }
 
         if messageData.count == 1 && messageData[0] == 0 {

@@ -8,15 +8,15 @@ class TunnelListRow: NSView {
         didSet(value) {
             // Bind to the tunnel's name
             nameLabel.stringValue = tunnel?.name ?? ""
-            nameObservationToken = tunnel?.observe(\TunnelContainer.name) { [weak self] tunnel, _ in
+            nameObservationToken = tunnel?.observeOnMain(\TunnelContainer.name) { [weak self] tunnel, _ in
                 self?.nameLabel.stringValue = tunnel.name
             }
             // Bind to the tunnel's status
             statusImageView.image = TunnelListRow.image(for: tunnel)
-            statusObservationToken = tunnel?.observe(\TunnelContainer.status) { [weak self] tunnel, _ in
+            statusObservationToken = tunnel?.observeOnMain(\TunnelContainer.status) { [weak self] tunnel, _ in
                 self?.statusImageView.image = TunnelListRow.image(for: tunnel)
             }
-            isOnDemandEnabledObservationToken = tunnel?.observe(\TunnelContainer.isActivateOnDemandEnabled) { [weak self] tunnel, _ in
+            isOnDemandEnabledObservationToken = tunnel?.observeOnMain(\TunnelContainer.isActivateOnDemandEnabled) { [weak self] tunnel, _ in
                 self?.statusImageView.image = TunnelListRow.image(for: tunnel)
             }
         }

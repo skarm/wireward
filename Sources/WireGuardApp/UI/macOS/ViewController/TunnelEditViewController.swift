@@ -3,6 +3,7 @@
 
 import Cocoa
 
+@MainActor
 protocol TunnelEditViewControllerDelegate: AnyObject {
     func tunnelSaved(tunnel: TunnelContainer)
     func tunnelEditingCancelled()
@@ -122,18 +123,24 @@ class TunnelEditViewController: NSViewController {
             dnsServersAddedToAllowedIPs = nil
         }
         privateKeyObservationToken = textView.observe(\.privateKeyString) { [weak publicKeyRow] textView, _ in
-            if let privateKeyString = textView.privateKeyString,
-               let privateKey = PrivateKey(base64Key: privateKeyString) {
-                publicKeyRow?.value = privateKey.publicKey.base64Key
+            MainActor.assumeIsolated {
+                if let privateKeyString = textView.privateKeyString,
+                   let privateKey = PrivateKey(base64Key: privateKeyString) {
+                    publicKeyRow?.value = privateKey.publicKey.base64Key
             } else {
                 publicKeyRow?.value = ""
             }
+            }
         }
         hasErrorObservationToken = textView.observe(\.hasError) { [weak saveButton] textView, _ in
-            saveButton?.isEnabled = !textView.hasError
+            MainActor.assumeIsolated {
+                saveButton?.isEnabled = !textView.hasError
+            }
         }
         singlePeerAllowedIPsObservationToken = textView.observe(\.singlePeerAllowedIPs) { [weak self] textView, _ in
-            self?.updateExcludePrivateIPsVisibility(singlePeerAllowedIPs: textView.singlePeerAllowedIPs)
+            MainActor.assumeIsolated {
+                self?.updateExcludePrivateIPsVisibility(singlePeerAllowedIPs: textView.singlePeerAllowedIPs)
+            }
         }
     }
 

@@ -8,7 +8,7 @@ This project contains applications for iOS and macOS, along with shared componen
 
 ## Building
 
-The current build baseline uses Xcode 27.0, Swift 5 language mode, and Go 1.19.13. The iOS and macOS applications and Network Extensions have been built as unsigned Debug arm64 binaries. Real-device tunnel validation is pending.
+Build with stable Xcode 27.0 (27A266a), Swift 6 language mode (Swift tools 6.4), and Go 1.27.1. Minimum deployment targets are macOS 13 and iOS 15. The iOS and macOS applications and Network Extensions have been built as unsigned Debug arm64 binaries. Real-device tunnel validation is pending.
 
 - Clone this repo:
 
@@ -30,7 +30,7 @@ $ vim Sources/WireGuardApp/Config/Developer.xcconfig
 $ brew install swiftlint
 ```
 
-- Install [Go 1.19.13](https://go.dev/dl/#go1.19.13) and ensure its `bin` directory is first on `PATH` in the build environment. Confirm that `go version` reports `go1.19.13`.
+- Install [Go 1.27.1](https://go.dev/dl/#go1.27.1). Set `GO` in `Developer.xcconfig` to the absolute path of its executable (for example, `GO = /opt/homebrew/bin/go`), or pass `GO=/absolute/path/to/go` to `xcodebuild` / `make`. The bridge rejects other Go versions and disables automatic toolchain switching.
 
 - Open project in Xcode:
 
@@ -39,6 +39,10 @@ $ open WireGuard.xcodeproj
 ```
 
 - Select the `WireGuardiOS` or `WireGuardmacOS` scheme, configure signing for the application and Network Extension targets, and build.
+
+## Swift 6 compatibility
+
+`TunnelConfiguration` is now a value type: edit a `var` copy and pass it back explicitly. Keys are immutable final `Sendable` types; `BaseKey` is a protocol. Adapter callbacks are `@Sendable`; app tunnel management and UI delegates are isolated to `MainActor`. Internal target names and bundle identifiers are unchanged.
 
 ## WireGuardKit integration
 

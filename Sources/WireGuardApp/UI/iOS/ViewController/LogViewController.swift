@@ -100,7 +100,7 @@ class LogViewController: UIViewController {
     func startUpdatingLogEntries() {
         updateLogEntries()
         updateLogEntriesTimer?.invalidate()
-        let timer = Timer(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
+        let timer = Timer.forMainRunLoop(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
             self?.updateLogEntries()
         }
         updateLogEntriesTimer = timer
@@ -115,12 +115,15 @@ class LogViewController: UIViewController {
         let timeStampString = dateFormatter.string(from: Date())
         let destinationURL = destinationDir.appendingPathComponent("wireguard-log-\(timeStampString).txt")
 
+        let barButtonItem = sender as? UIBarButtonItem
         DispatchQueue.global(qos: .userInitiated).async {
 
             if FileManager.default.fileExists(atPath: destinationURL.path) {
                 let isDeleted = FileManager.deleteFile(at: destinationURL)
                 if !isDeleted {
-                    ErrorPresenter.showErrorAlert(title: tr("alertUnableToRemovePreviousLogTitle"), message: tr("alertUnableToRemovePreviousLogMessage"), from: self)
+                    DispatchQueue.main.async {
+                        ErrorPresenter.showErrorAlert(title: tr("alertUnableToRemovePreviousLogTitle"), message: tr("alertUnableToRemovePreviousLogMessage"), from: self)
+                    }
                     return
                 }
             }
@@ -133,7 +136,7 @@ class LogViewController: UIViewController {
                     return
                 }
                 let activityVC = UIActivityViewController(activityItems: [destinationURL], applicationActivities: nil)
-                if let sender = sender as? UIBarButtonItem {
+                if let sender = barButtonItem {
                     activityVC.popoverPresentationController?.barButtonItem = sender
                 }
                 activityVC.completionWithItemsHandler = { _, _, _, _ in

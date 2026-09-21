@@ -4,6 +4,7 @@
 import AVFoundation
 import UIKit
 
+@MainActor
 protocol QRScanViewControllerDelegate: AnyObject {
     func addScannedQRCode(tunnelConfiguration: TunnelConfiguration, qrScanViewController: QRScanViewController, completionHandler: (() -> Void)?)
 }
@@ -114,6 +115,7 @@ class QRScanViewController: UIViewController {
         })
         alert.addAction(UIAlertAction(title: tr("actionSave"), style: .default) { [weak self] _ in
             guard let title = alert.textFields?[0].text?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return }
+            var tunnelConfiguration = tunnelConfiguration
             tunnelConfiguration.name = title
             if let self = self {
                 self.delegate?.addScannedQRCode(tunnelConfiguration: tunnelConfiguration, qrScanViewController: self) {
@@ -138,7 +140,8 @@ class QRScanViewController: UIViewController {
     }
 }
 
-extension QRScanViewController: AVCaptureMetadataOutputObjectsDelegate {
+// The metadata output is configured to invoke this delegate on DispatchQueue.main.
+extension QRScanViewController: @MainActor AVCaptureMetadataOutputObjectsDelegate {
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         captureSession?.stopRunning()
 

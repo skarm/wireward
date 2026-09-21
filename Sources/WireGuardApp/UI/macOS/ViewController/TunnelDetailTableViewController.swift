@@ -101,7 +101,7 @@ class TunnelDetailTableViewController: NSViewController {
         super.init(nibName: nil, bundle: nil)
         updateTableViewModelRowsBySection()
         updateTableViewModelRows()
-        statusObservationToken = tunnel.observe(\TunnelContainer.status) { [weak self] _, _ in
+        statusObservationToken = tunnel.observeOnMain(\TunnelContainer.status) { [weak self] _, _ in
             guard let self = self else { return }
             if tunnel.status == .active {
                 self.startUpdatingRuntimeConfiguration()
@@ -352,7 +352,7 @@ class TunnelDetailTableViewController: NSViewController {
     func startUpdatingRuntimeConfiguration() {
         reloadRuntimeConfiguration()
         reloadRuntimeConfigurationTimer?.invalidate()
-        let reloadTimer = Timer(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
+        let reloadTimer = Timer.forMainRunLoop(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
             self?.reloadRuntimeConfiguration()
         }
         reloadRuntimeConfigurationTimer = reloadTimer
@@ -433,14 +433,14 @@ extension TunnelDetailTableViewController: NSTableViewDelegate {
         cell.key = tr(format: "macFieldKey (%@)", tr("tunnelInterfaceStatus"))
         cell.value = TunnelDetailTableViewController.localizedStatusDescription(for: tunnel)
         cell.valueImage = TunnelDetailTableViewController.image(for: tunnel)
-        let changeHandler: (TunnelContainer, Any) -> Void = { [weak cell] tunnel, _ in
+        let changeHandler: @MainActor (TunnelContainer, Void) -> Void = { [weak cell] tunnel, _ in
             guard let cell = cell else { return }
             cell.value = TunnelDetailTableViewController.localizedStatusDescription(for: tunnel)
             cell.valueImage = TunnelDetailTableViewController.image(for: tunnel)
         }
-        cell.statusObservationToken = tunnel.observe(\.status, changeHandler: changeHandler)
-        cell.isOnDemandEnabledObservationToken = tunnel.observe(\.isActivateOnDemandEnabled, changeHandler: changeHandler)
-        cell.hasOnDemandRulesObservationToken = tunnel.observe(\.hasOnDemandRules, changeHandler: changeHandler)
+        cell.statusObservationToken = tunnel.observeOnMain(\.status, changeHandler: changeHandler)
+        cell.isOnDemandEnabledObservationToken = tunnel.observeOnMain(\.isActivateOnDemandEnabled, changeHandler: changeHandler)
+        cell.hasOnDemandRulesObservationToken = tunnel.observeOnMain(\.hasOnDemandRules, changeHandler: changeHandler)
         return cell
     }
 
@@ -452,14 +452,14 @@ extension TunnelDetailTableViewController: NSTableViewDelegate {
         cell.onButtonClicked = { [weak self] in
             self?.handleToggleActiveStatusAction()
         }
-        let changeHandler: (TunnelContainer, Any) -> Void = { [weak cell] tunnel, _ in
+        let changeHandler: @MainActor (TunnelContainer, Void) -> Void = { [weak cell] tunnel, _ in
             guard let cell = cell else { return }
             cell.buttonTitle = TunnelDetailTableViewController.localizedToggleStatusActionText(for: tunnel)
             cell.isButtonEnabled = (tunnel.hasOnDemandRules || tunnel.status == .active || tunnel.status == .inactive)
         }
-        cell.statusObservationToken = tunnel.observe(\.status, changeHandler: changeHandler)
-        cell.isOnDemandEnabledObservationToken = tunnel.observe(\.isActivateOnDemandEnabled, changeHandler: changeHandler)
-        cell.hasOnDemandRulesObservationToken = tunnel.observe(\.hasOnDemandRules, changeHandler: changeHandler)
+        cell.statusObservationToken = tunnel.observeOnMain(\.status, changeHandler: changeHandler)
+        cell.isOnDemandEnabledObservationToken = tunnel.observeOnMain(\.isActivateOnDemandEnabled, changeHandler: changeHandler)
+        cell.hasOnDemandRulesObservationToken = tunnel.observeOnMain(\.hasOnDemandRules, changeHandler: changeHandler)
         return cell
     }
 

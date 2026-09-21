@@ -3,6 +3,7 @@
 
 import Cocoa
 
+@MainActor
 class ImportPanelPresenter {
     static func presentImportPanel(tunnelsManager: TunnelsManager, sourceVC: NSViewController?) {
         guard let window = sourceVC?.view.window else { return }

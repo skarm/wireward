@@ -3,8 +3,9 @@
 
 import Foundation
 
+@MainActor
 class ZipImporter {
-    static func importConfigFiles(from url: URL, completion: @escaping (Result<[TunnelConfiguration?], ZipArchiveError>) -> Void) {
+    static func importConfigFiles(from url: URL, completion: @escaping @MainActor (Result<[TunnelConfiguration?], ZipArchiveError>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var unarchivedFiles: [(fileBaseName: String, contents: Data)]
             do {
@@ -39,7 +40,8 @@ class ZipImporter {
                 guard let tunnelConfig = try? TunnelConfiguration(fromWgQuickConfig: fileContents, called: file.fileBaseName) else { continue }
                 configs[index] = tunnelConfig
             }
-            DispatchQueue.main.async { completion(.success(configs)) }
+            let result = configs
+            DispatchQueue.main.async { completion(.success(result)) }
         }
     }
 }

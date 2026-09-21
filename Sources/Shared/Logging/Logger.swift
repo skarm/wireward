@@ -4,15 +4,19 @@
 import Foundation
 import os.log
 
-public class Logger {
+// The C log handle never escapes. NSLock serializes reads/writes and immutable fields
+// remain valid until the last strong reference is released (then deinit closes it).
+public final class Logger: @unchecked Sendable {
     enum LoggerError: Error {
         case openFailure
     }
 
-    static var global: Logger?
+    private static let globalStorage = LockedValue<Logger?>(nil)
+    static var global: Logger? { globalStorage.withLock { $0 } }
+    private let lock = NSLock()
 
-    var log: OpaquePointer
-    var tag: String
+    private let log: OpaquePointer
+    private let tag: String
 
     init(tagged tag: String, withFilePath filePath: String) throws {
         guard let log = open_log(filePath) else { throw LoggerError.openFailure }
@@ -25,10 +29,14 @@ public class Logger {
     }
 
     func log(message: String) {
+        lock.lock()
+        defer { lock.unlock() }
         write_msg_to_log(log, tag, message.trimmingCharacters(in: .newlines))
     }
 
     func writeLog(to targetFile: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
         return write_log_to_file(targetFile, self.log) == 0
     }
 
@@ -44,7 +52,12 @@ public class Logger {
             os_log("Unable to open log file for writing. Log will not be saved to file.", log: OSLog.default, type: .error)
             return
         }
-        Logger.global = logger
+        let installed = globalStorage.withLock { current in
+            guard current == nil else { return false }
+            current = logger
+            return true
+        }
+        guard installed else { return }
         var appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown version"
         if let appBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
             appVersion += " (\(appBuild))"

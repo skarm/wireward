@@ -5,6 +5,7 @@ import Foundation
 import NetworkExtension
 import os.log
 
+@MainActor
 protocol TunnelsManagerListDelegate: AnyObject {
     func tunnelAdded(at index: Int)
     func tunnelModified(at index: Int)
@@ -12,6 +13,7 @@ protocol TunnelsManagerListDelegate: AnyObject {
     func tunnelRemoved(at index: Int, tunnel: TunnelContainer)
 }
 
+@MainActor
 protocol TunnelsManagerActivationDelegate: AnyObject {
     func tunnelActivationAttemptFailed(tunnel: TunnelContainer, error: TunnelsManagerActivationAttemptError) // startTunnel wasn't called or failed
     func tunnelActivationAttemptSucceeded(tunnel: TunnelContainer) // startTunnel succeeded
@@ -19,6 +21,7 @@ protocol TunnelsManagerActivationDelegate: AnyObject {
     func tunnelActivationSucceeded(tunnel: TunnelContainer) // status changed to connected
 }
 
+@MainActor
 class TunnelsManager {
     private var tunnels: [TunnelContainer]
     weak var tunnelsListDelegate: TunnelsManagerListDelegate?
@@ -33,11 +36,11 @@ class TunnelsManager {
         startObservingTunnelConfigurations()
     }
 
-    static func create(completionHandler: @escaping (Result<TunnelsManager, TunnelsManagerError>) -> Void) {
+    static func create(completionHandler: @escaping @MainActor (Result<TunnelsManager, TunnelsManagerError>) -> Void) {
         #if targetEnvironment(simulator)
         completionHandler(.success(TunnelsManager(tunnelProviders: MockTunnels.createMockTunnels())))
         #else
-        NETunnelProviderManager.loadAllFromPreferences { managers, error in
+        NETunnelProviderManager.loadAllOnMain { managers, error in
             if let error = error {
                 wg_log(.error, message: "Failed to load tunnel provider managers: \(error)")
                 completionHandler(.failure(TunnelsManagerError.systemErrorOnListingTunnels(systemError: error)))
@@ -53,7 +56,7 @@ class TunnelsManager {
                 }
                 guard let proto = tunnelManager.protocolConfiguration as? NETunnelProviderProtocol else { continue }
                 if proto.migrateConfigurationIfNeeded(called: tunnelManager.localizedDescription ?? "unknown") {
-                    tunnelManager.saveToPreferences { _ in }
+                    tunnelManager.saveOnMain { _ in }
                 }
                 #if os(iOS)
                 let passwordRef = proto.verifyConfigurationReference() ? proto.passwordReference : nil
@@ -71,7 +74,7 @@ class TunnelsManager {
                     refs.insert(ref)
                 } else {
                     wg_log(.info, message: "Removing orphaned tunnel with non-verifying keychain entry: \(tunnelManager.localizedDescription ?? "<unknown>")")
-                    tunnelManager.removeFromPreferences { _ in }
+                    tunnelManager.removeOnMain { _ in }
                     tunnelManagers.remove(at: index)
                 }
             }
@@ -85,7 +88,7 @@ class TunnelsManager {
     }
 
     func reload() {
-        NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
+        NETunnelProviderManager.loadAllOnMain { [weak self] managers, _ in
             guard let self = self else { return }
 
             let loadedTunnelProviders = managers ?? []
@@ -105,7 +108,7 @@ class TunnelsManager {
                     // Tunnel was added outside the app
                     if let proto = loadedTunnelProvider.protocolConfiguration as? NETunnelProviderProtocol {
                         if proto.migrateConfigurationIfNeeded(called: loadedTunnelProvider.localizedDescription ?? "unknown") {
-                            loadedTunnelProvider.saveToPreferences { _ in }
+                            loadedTunnelProvider.saveOnMain { _ in }
                         }
                     }
                     let tunnel = TunnelContainer(tunnel: loadedTunnelProvider)
@@ -117,7 +120,7 @@ class TunnelsManager {
         }
     }
 
-    func add(tunnelConfiguration: TunnelConfiguration, onDemandOption: ActivateOnDemandOption = .off, completionHandler: @escaping (Result<TunnelContainer, TunnelsManagerError>) -> Void) {
+    func add(tunnelConfiguration: TunnelConfiguration, onDemandOption: ActivateOnDemandOption = .off, completionHandler: @escaping @MainActor (Result<TunnelContainer, TunnelsManagerError>) -> Void) {
         let tunnelName = tunnelConfiguration.name ?? ""
         if tunnelName.isEmpty {
             completionHandler(.failure(TunnelsManagerError.tunnelNameEmpty))
@@ -137,7 +140,7 @@ class TunnelsManager {
 
         let activeTunnel = tunnels.first { $0.status == .active || $0.status == .activating }
 
-        tunnelProviderManager.saveToPreferences { [weak self] error in
+        tunnelProviderManager.saveOnMain { [weak self] error in
             if let error = error {
                 wg_log(.error, message: "Add: Saving configuration failed: \(error)")
                 (tunnelProviderManager.protocolConfiguration as? NETunnelProviderProtocol)?.destroyConfigurationReference()
@@ -168,7 +171,7 @@ class TunnelsManager {
         }
     }
 
-    func addMultiple(tunnelConfigurations: [TunnelConfiguration], completionHandler: @escaping (UInt, TunnelsManagerError?) -> Void) {
+    func addMultiple(tunnelConfigurations: [TunnelConfiguration], completionHandler: @escaping @MainActor (UInt, TunnelsManagerError?) -> Void) {
         // Temporarily pause observation of changes to VPN configurations to prevent the feedback
         // loop that causes `reload()` to be called on each newly added tunnel, which significantly
         // impacts performance.
@@ -185,7 +188,7 @@ class TunnelsManager {
         }
     }
 
-    private func addMultiple(tunnelConfigurations: ArraySlice<TunnelConfiguration>, numberSuccessful: UInt, lastError: TunnelsManagerError?, completionHandler: @escaping (UInt, TunnelsManagerError?) -> Void) {
+    private func addMultiple(tunnelConfigurations: ArraySlice<TunnelConfiguration>, numberSuccessful: UInt, lastError: TunnelsManagerError?, completionHandler: @escaping @MainActor (UInt, TunnelsManagerError?) -> Void) {
         guard let head = tunnelConfigurations.first else {
             completionHandler(numberSuccessful, lastError)
             return
@@ -209,7 +212,7 @@ class TunnelsManager {
     func modify(tunnel: TunnelContainer, tunnelConfiguration: TunnelConfiguration,
                 onDemandOption: ActivateOnDemandOption,
                 shouldEnsureOnDemandEnabled: Bool = false,
-                completionHandler: @escaping (TunnelsManagerError?) -> Void) {
+                completionHandler: @escaping @MainActor (TunnelsManagerError?) -> Void) {
         let tunnelName = tunnelConfiguration.name ?? ""
         if tunnelName.isEmpty {
             completionHandler(TunnelsManagerError.tunnelNameEmpty)
@@ -254,7 +257,7 @@ class TunnelsManager {
             tunnelProviderManager.isOnDemandEnabled = true
         }
 
-        tunnelProviderManager.saveToPreferences { [weak self] error in
+        tunnelProviderManager.saveOnMain { [weak self] error in
             if let error = error {
                 // TODO: the passwordReference for the old one has already been removed at this point and we can't easily roll back!
                 wg_log(.error, message: "Modify: Saving configuration failed: \(error)")
@@ -284,7 +287,7 @@ class TunnelsManager {
             if isActivatingOnDemand {
                 // Reload tunnel after saving.
                 // Without this, the tunnel stopes getting updates on the tunnel status from iOS.
-                tunnelProviderManager.loadFromPreferences { error in
+                tunnelProviderManager.loadOnMain { error in
                     tunnel.isActivateOnDemandEnabled = tunnelProviderManager.isOnDemandEnabled
                     if let error = error {
                         wg_log(.error, message: "Modify: Re-loading after saving configuration failed: \(error)")
@@ -299,7 +302,7 @@ class TunnelsManager {
         }
     }
 
-    func remove(tunnel: TunnelContainer, completionHandler: @escaping (TunnelsManagerError?) -> Void) {
+    func remove(tunnel: TunnelContainer, completionHandler: @escaping @MainActor (TunnelsManagerError?) -> Void) {
         let tunnelProviderManager = tunnel.tunnelProvider
         #if os(macOS)
         if tunnel.isTunnelAvailableToUser {
@@ -310,7 +313,7 @@ class TunnelsManager {
         #else
         #error("Unimplemented")
         #endif
-        tunnelProviderManager.removeFromPreferences { [weak self] error in
+        tunnelProviderManager.removeOnMain { [weak self] error in
             if let error = error {
                 wg_log(.error, message: "Remove: Saving configuration failed: \(error)")
                 completionHandler(TunnelsManagerError.systemErrorOnRemoveTunnel(systemError: error))
@@ -328,7 +331,7 @@ class TunnelsManager {
         }
     }
 
-    func removeMultiple(tunnels: [TunnelContainer], completionHandler: @escaping (TunnelsManagerError?) -> Void) {
+    func removeMultiple(tunnels: [TunnelContainer], completionHandler: @escaping @MainActor (TunnelsManagerError?) -> Void) {
         // Temporarily pause observation of changes to VPN configurations to prevent the feedback
         // loop that causes `reload()` to be called for each removed tunnel, which significantly
         // impacts performance.
@@ -345,7 +348,7 @@ class TunnelsManager {
         }
     }
 
-    private func removeMultiple(tunnels: ArraySlice<TunnelContainer>, completionHandler: @escaping (TunnelsManagerError?) -> Void) {
+    private func removeMultiple(tunnels: ArraySlice<TunnelContainer>, completionHandler: @escaping @MainActor (TunnelsManagerError?) -> Void) {
         guard let head = tunnels.first else {
             completionHandler(nil)
             return
@@ -362,7 +365,7 @@ class TunnelsManager {
         }
     }
 
-    func setOnDemandEnabled(_ isOnDemandEnabled: Bool, on tunnel: TunnelContainer, completionHandler: @escaping (TunnelsManagerError?) -> Void) {
+    func setOnDemandEnabled(_ isOnDemandEnabled: Bool, on tunnel: TunnelContainer, completionHandler: @escaping @MainActor (TunnelsManagerError?) -> Void) {
         let tunnelProviderManager = tunnel.tunnelProvider
         let isCurrentlyEnabled = (tunnelProviderManager.isOnDemandEnabled && tunnelProviderManager.isEnabled)
         guard isCurrentlyEnabled != isOnDemandEnabled else {
@@ -372,7 +375,7 @@ class TunnelsManager {
         let isActivatingOnDemand = !tunnelProviderManager.isOnDemandEnabled && isOnDemandEnabled
         tunnelProviderManager.isOnDemandEnabled = isOnDemandEnabled
         tunnelProviderManager.isEnabled = true
-        tunnelProviderManager.saveToPreferences { error in
+        tunnelProviderManager.saveOnMain { error in
             if let error = error {
                 wg_log(.error, message: "Modify On-Demand: Saving configuration failed: \(error)")
                 completionHandler(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
@@ -381,7 +384,7 @@ class TunnelsManager {
             if isActivatingOnDemand {
                 // If we're enabling on-demand, we want to make sure the tunnel is enabled.
                 // If not enabled, the OS will not turn the tunnel on/off based on our rules.
-                tunnelProviderManager.loadFromPreferences { error in
+                tunnelProviderManager.loadOnMain { error in
                     // isActivateOnDemandEnabled will get changed in reload(), but no harm in setting it here too
                     tunnel.isActivateOnDemandEnabled = tunnelProviderManager.isOnDemandEnabled
                     if let error = error {
@@ -485,7 +488,7 @@ class TunnelsManager {
     }
 
     private func activateWaitingTunnelOnDeactivation(of tunnel: TunnelContainer) {
-        waiteeObservationToken = tunnel.observe(\.status) { [weak self] tunnel, _ in
+        waiteeObservationToken = tunnel.observeOnMain(\.status) { [weak self] tunnel, _ in
             guard let self = self else { return }
             if tunnel.status == .inactive {
                 if let waitingTunnel = self.tunnels.first(where: { $0.status == .waiting }) {
@@ -497,7 +500,7 @@ class TunnelsManager {
     }
 
     private func startObservingTunnelStatuses() {
-        statusObservationToken = NotificationCenter.default.observe(name: .NEVPNStatusDidChange, object: nil, queue: OperationQueue.main) { [weak self] statusChangeNotification in
+        statusObservationToken = NotificationCenter.default.observeOnMain(name: .NEVPNStatusDidChange, object: nil) { [weak self] statusChangeNotification in
             guard let self = self,
                 let session = statusChangeNotification.object as? NETunnelProviderSession,
                 let tunnelProvider = session.manager as? NETunnelProviderManager,
@@ -534,7 +537,7 @@ class TunnelsManager {
     }
 
     func startObservingTunnelConfigurations() {
-        configurationsObservationToken = NotificationCenter.default.observe(name: .NEVPNConfigurationChange, object: nil, queue: OperationQueue.main) { [weak self] _ in
+        configurationsObservationToken = NotificationCenter.default.observeOnMain(name: .NEVPNConfigurationChange, object: nil) { [weak self] _ in
             DispatchQueue.main.async { [weak self] in
                 // We schedule reload() in a subsequent runloop to ensure that the completion handler of loadAllFromPreferences
                 // (reload() calls loadAllFromPreferences) is called after the completion handler of the saveToPreferences or
@@ -545,11 +548,12 @@ class TunnelsManager {
         }
     }
 
-    static func tunnelNameIsLessThan(_ lhs: String, _ rhs: String) -> Bool {
+    nonisolated static func tunnelNameIsLessThan(_ lhs: String, _ rhs: String) -> Bool {
         return lhs.compare(rhs, options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive, .numeric]) == .orderedAscending
     }
 }
 
+@MainActor
 private func lastErrorTextFromNetworkExtension(for tunnel: TunnelContainer) -> (title: String, message: String)? {
     guard let lastErrorFileURL = FileManager.networkExtensionLastErrorFileURL else { return nil }
     guard let lastErrorData = try? Data(contentsOf: lastErrorFileURL) else { return nil }
@@ -563,6 +567,7 @@ private func lastErrorTextFromNetworkExtension(for tunnel: TunnelContainer) -> (
     return (tr("alertTunnelActivationFailureTitle"), tr("alertTunnelActivationFailureMessage"))
 }
 
+@MainActor
 class TunnelContainer: NSObject {
     @objc dynamic var name: String
     @objc dynamic var status: TunnelStatus
@@ -574,7 +579,7 @@ class TunnelContainer: NSObject {
         didSet {
             if isAttemptingActivation {
                 self.activationTimer?.invalidate()
-                let activationTimer = Timer(timeInterval: 5 /* seconds */, repeats: true) { [weak self] _ in
+                let activationTimer = Timer.forMainRunLoop(timeInterval: 5 /* seconds */, repeats: true) { [weak self] _ in
                     guard let self = self else { return }
                     wg_log(.debug, message: "Status update notification timeout for tunnel '\(self.name)'. Tunnel status is now '\(self.tunnelProvider.connection.status)'.")
                     switch self.tunnelProvider.connection.status {
@@ -627,7 +632,7 @@ class TunnelContainer: NSObject {
         super.init()
     }
 
-    func getRuntimeTunnelConfiguration(completionHandler: @escaping ((TunnelConfiguration?) -> Void)) {
+    func getRuntimeTunnelConfiguration(completionHandler: @escaping @MainActor (TunnelConfiguration?) -> Void) {
         guard status != .inactive, let session = tunnelProvider.connection as? NETunnelProviderSession else {
             completionHandler(tunnelConfiguration)
             return
@@ -667,7 +672,7 @@ class TunnelContainer: NSObject {
             // then call this function again.
             wg_log(.debug, staticMessage: "startActivation: Tunnel is disabled. Re-enabling and saving")
             tunnelProvider.isEnabled = true
-            tunnelProvider.saveToPreferences { [weak self] error in
+            tunnelProvider.saveOnMain { [weak self] error in
                 guard let self = self else { return }
                 if error != nil {
                     wg_log(.error, message: "Error saving tunnel after re-enabling: \(error!)")
@@ -704,7 +709,7 @@ class TunnelContainer: NSObject {
                 return
             }
             wg_log(.debug, staticMessage: "startActivation: Will reload tunnel and then try to start it.")
-            tunnelProvider.loadFromPreferences { [weak self] error in
+            tunnelProvider.loadOnMain { [weak self] error in
                 guard let self = self else { return }
                 if error != nil {
                     wg_log(.error, message: "startActivation: Error reloading tunnel: \(error!)")
@@ -724,6 +729,7 @@ class TunnelContainer: NSObject {
     }
 }
 
+@MainActor
 extension NETunnelProviderManager {
     private static var cachedConfigKey: UInt8 = 0
 
@@ -746,5 +752,43 @@ extension NETunnelProviderManager {
 
     func isEquivalentTo(_ tunnel: TunnelContainer) -> Bool {
         return localizedDescription == tunnel.name && tunnelConfiguration == tunnel.tunnelConfiguration
+    }
+}
+
+// NEVPNManager documents main-thread completion for preference operations.
+// Check that contract at the boundary instead of spreading unsafe Sendable conformances.
+@MainActor
+private extension NETunnelProviderManager {
+    static func loadAllOnMain(completion: @escaping @MainActor ([NETunnelProviderManager]?, Error?) -> Void) {
+        loadAllFromPreferences { managers, error in
+            // Apple's completion contract is the main thread. These Objective-C objects
+            // stay on that thread; assert isolation before exposing them to the app.
+            nonisolated(unsafe) let mainThreadManagers = managers
+            MainActor.assumeIsolated { completion(mainThreadManagers, error) }
+        }
+    }
+
+    func saveOnMain(completion: @escaping @MainActor (Error?) -> Void) {
+        saveToPreferences { error in MainActor.assumeIsolated { completion(error) } }
+    }
+
+    func loadOnMain(completion: @escaping @MainActor (Error?) -> Void) {
+        loadFromPreferences { error in MainActor.assumeIsolated { completion(error) } }
+    }
+
+    func removeOnMain(completion: @escaping @MainActor (Error?) -> Void) {
+        removeFromPreferences { error in MainActor.assumeIsolated { completion(error) } }
+    }
+}
+
+@MainActor
+extension TunnelContainer {
+    // KVO is synchronous with setters; every observable property is MainActor-isolated.
+    func observeOnMain<Value>(_ keyPath: KeyPath<TunnelContainer, Value>,
+                              options: NSKeyValueObservingOptions = [],
+                              changeHandler: @escaping @MainActor (TunnelContainer, Void) -> Void) -> NSKeyValueObservation {
+        observe(keyPath, options: options) { object, _ in
+            MainActor.assumeIsolated { changeHandler(object, ()) }
+        }
     }
 }

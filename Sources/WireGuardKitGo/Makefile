@@ -9,7 +9,14 @@ SDKROOT ?= $(shell xcrun --sdk $(PLATFORM_NAME) --show-sdk-path)
 CONFIGURATION_BUILD_DIR ?= $(CURDIR)/out
 CONFIGURATION_TEMP_DIR ?= $(CURDIR)/.tmp
 
-export PATH := $(PATH):/usr/local/bin:/opt/homebrew/bin
+# Pass an absolute GO path from Xcode/CI; never select another Homebrew toolchain.
+GO ?= go
+export GOTOOLCHAIN := local
+export GOENV := off
+GO_VERSION := $(shell $(GO) env GOVERSION)
+ifneq ($(GO_VERSION),go1.27.1)
+$(error Go 1.27.1 is required; selected $(GO_VERSION) via $(GO))
+endif
 export CC ?= clang
 LIPO ?= lipo
 DESTDIR ?= $(CONFIGURATION_BUILD_DIR)
@@ -24,9 +31,9 @@ GOOS_iphoneos := ios
 build: $(DESTDIR)/libwg-go.a
 version-header: $(DESTDIR)/wireguard-go-version.h
 
-REAL_GOROOT := $(shell go env GOROOT 2>/dev/null)
-export GOROOT := $(BUILDDIR)/goroot
-$(GOROOT)/.prepared:
+REAL_GOROOT := $(shell $(GO) env GOROOT 2>/dev/null)
+export GOROOT := $(BUILDDIR)/$(GO_VERSION)/goroot
+$(GOROOT)/.prepared: goruntime-boottime-over-monotonic.diff Makefile
 	[ -n "$(REAL_GOROOT)" ]
 	mkdir -p "$(GOROOT)"
 	rsync -a --delete --exclude=pkg/obj/go-build "$(REAL_GOROOT)/" "$(GOROOT)/"
@@ -39,8 +46,8 @@ $(BUILDDIR)/libwg-go-$(1).a: export CGO_CFLAGS := $(CFLAGS_PREFIX) $(ARCH)
 $(BUILDDIR)/libwg-go-$(1).a: export CGO_LDFLAGS := $(CFLAGS_PREFIX) $(ARCH)
 $(BUILDDIR)/libwg-go-$(1).a: export GOOS := $(GOOS_$(PLATFORM_NAME))
 $(BUILDDIR)/libwg-go-$(1).a: export GOARCH := $(GOARCH_$(1))
-$(BUILDDIR)/libwg-go-$(1).a: $(GOROOT)/.prepared go.mod
-	go build -ldflags=-w -trimpath -v -o "$(BUILDDIR)/libwg-go-$(1).a" -buildmode c-archive
+$(BUILDDIR)/libwg-go-$(1).a: $(GOROOT)/.prepared go.mod go.sum api-apple.go Makefile
+	$(GO) build -ldflags=-w -trimpath -v -o "$(BUILDDIR)/libwg-go-$(1).a" -buildmode c-archive
 	rm -f "$(BUILDDIR)/libwg-go-$(1).h"
 endef
 $(foreach ARCH,$(ARCHS),$(eval $(call libwg-go-a,$(ARCH))))

@@ -9,10 +9,12 @@ class LogViewController: NSViewController {
         case time = "Time"
         case logMessage = "LogMessage"
 
+        @MainActor
         func createColumn() -> NSTableColumn {
             return NSTableColumn(identifier: NSUserInterfaceItemIdentifier(rawValue))
         }
 
+        @MainActor
         func isRepresenting(tableColumn: NSTableColumn?) -> Bool {
             return tableColumn?.identifier.rawValue == rawValue
         }
@@ -107,13 +109,13 @@ class LogViewController: NSViewController {
         clipView.documentView = tableView
         scrollView.contentView = clipView
 
-        boundsChangedNotificationToken = NotificationCenter.default.observe(name: NSView.boundsDidChangeNotification, object: clipView, queue: OperationQueue.main) { [weak self] _ in
+        boundsChangedNotificationToken = NotificationCenter.default.observeOnMain(name: NSView.boundsDidChangeNotification, object: clipView) { [weak self] _ in
             guard let self = self else { return }
             let lastVisibleRowIndex = self.tableView.row(at: NSPoint(x: 0, y: self.scrollView.contentView.documentVisibleRect.maxY - 1))
             self.isInScrolledToEndMode = lastVisibleRowIndex < 0 || lastVisibleRowIndex == self.logEntries.count - 1
         }
 
-        frameChangedNotificationToken = NotificationCenter.default.observe(name: NSView.frameDidChangeNotification, object: tableView, queue: OperationQueue.main) { [weak self] _ in
+        frameChangedNotificationToken = NotificationCenter.default.observeOnMain(name: NSView.frameDidChangeNotification, object: tableView) { [weak self] _ in
             guard let self = self else { return }
             if self.isInScrolledToEndMode {
                 DispatchQueue.main.async {
@@ -184,7 +186,7 @@ class LogViewController: NSViewController {
     func startUpdatingLogEntries() {
         updateLogEntries()
         updateLogEntriesTimer?.invalidate()
-        let timer = Timer(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
+        let timer = Timer.forMainRunLoop(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
             self?.updateLogEntries()
         }
         updateLogEntriesTimer = timer

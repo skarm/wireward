@@ -5,18 +5,16 @@ import Cocoa
 
 // swiftlint:disable colon
 
+@MainActor
 class MainMenu: NSMenu {
-    init() {
-        super.init(title: "")
-        addSubmenu(createApplicationMenu())
-        addSubmenu(createFileMenu())
-        addSubmenu(createEditMenu())
-        addSubmenu(createTunnelMenu())
-        addSubmenu(createWindowMenu())
-    }
-
-    required init(coder decoder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+    static func make() -> MainMenu {
+        let menu = MainMenu(title: "")
+        menu.addSubmenu(menu.createApplicationMenu())
+        menu.addSubmenu(menu.createFileMenu())
+        menu.addSubmenu(menu.createEditMenu())
+        menu.addSubmenu(menu.createTunnelMenu())
+        menu.addSubmenu(menu.createWindowMenu())
+        return menu
     }
 
     private func addSubmenu(_ menu: NSMenu) {

@@ -4,7 +4,8 @@
 import Cocoa
 import ServiceManagement
 
-@NSApplicationMain
+@main
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     var tunnelsManager: TunnelsManager?
@@ -34,7 +35,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             isLaunchedAtLogin = LaunchedAtLoginDetector.isLaunchedAtLogin(openAppleEvent: appleEvent)
         }
 
-        NSApp.mainMenu = MainMenu()
+        NSApp.mainMenu = MainMenu.make()
         setDockIconAndMainMenuVisibility(isVisible: !isLaunchedAtLogin)
 
         TunnelsManager.create { [weak self] result in

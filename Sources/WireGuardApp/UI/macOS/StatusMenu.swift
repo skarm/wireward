@@ -3,10 +3,12 @@
 
 import Cocoa
 
+@MainActor
 protocol StatusMenuWindowDelegate: AnyObject {
     func showManageTunnelsWindow(completion: ((NSWindow?) -> Void)?)
 }
 
+@MainActor
 class StatusMenu: NSMenu {
 
     let tunnelsManager: TunnelsManager
@@ -295,6 +297,7 @@ extension StatusMenu {
     }
 }
 
+@MainActor
 class TunnelMenuItem: NSMenuItem {
 
     var tunnel: TunnelContainer
@@ -307,14 +310,14 @@ class TunnelMenuItem: NSMenuItem {
         self.tunnel = tunnel
         super.init(title: tunnel.name, action: selector, keyEquivalent: "")
         updateStatus()
-        let statusObservationToken = tunnel.observe(\.status) { [weak self] _, _ in
+        let statusObservationToken = tunnel.observeOnMain(\.status) { [weak self] _, _ in
             self?.updateStatus()
         }
         updateTitle()
-        let nameObservationToken = tunnel.observe(\TunnelContainer.name) { [weak self] _, _ in
+        let nameObservationToken = tunnel.observeOnMain(\TunnelContainer.name) { [weak self] _, _ in
             self?.updateTitle()
         }
-        let isOnDemandEnabledObservationToken = tunnel.observe(\.isActivateOnDemandEnabled) { [weak self] _, _ in
+        let isOnDemandEnabledObservationToken = tunnel.observeOnMain(\.isActivateOnDemandEnabled) { [weak self] _, _ in
             self?.updateTitle()
             self?.updateStatus()
         }

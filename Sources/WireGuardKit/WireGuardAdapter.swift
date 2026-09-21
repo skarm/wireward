@@ -38,8 +38,11 @@ private enum State {
     case temporaryShutdown(_ settingsGenerator: PacketTunnelSettingsGenerator)
 }
 
-public class WireGuardAdapter {
-    public typealias LogHandler = (WireGuardLogLevel, String) -> Void
+// Mutable adapter state and the provider are used only on workQueue after initialization.
+// Monitor callbacks run on that same queue; completions and logging are Sendable.
+// DispatchQueue confinement cannot be expressed as an actor on the iOS 15 baseline.
+public final class WireGuardAdapter: @unchecked Sendable {
+    public typealias LogHandler = @Sendable (WireGuardLogLevel, String) -> Void
 
     /// Network routes monitor.
     private var networkMonitor: NWPathMonitor?
@@ -154,7 +157,7 @@ public class WireGuardAdapter {
 
     /// Returns a runtime configuration from WireGuard.
     /// - Parameter completionHandler: completion handler.
-    public func getRuntimeConfiguration(completionHandler: @escaping (String?) -> Void) {
+    public func getRuntimeConfiguration(completionHandler: @escaping @Sendable (String?) -> Void) {
         workQueue.async {
             guard case .started(let handle, _) = self.state else {
                 completionHandler(nil)
@@ -174,7 +177,7 @@ public class WireGuardAdapter {
     /// - Parameters:
     ///   - tunnelConfiguration: tunnel configuration.
     ///   - completionHandler: completion handler.
-    public func start(tunnelConfiguration: TunnelConfiguration, completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
+    public func start(tunnelConfiguration: TunnelConfiguration, completionHandler: @escaping @Sendable (WireGuardAdapterError?) -> Void) {
         workQueue.async {
             guard case .stopped = self.state else {
                 completionHandler(.invalidState)
@@ -182,7 +185,7 @@ public class WireGuardAdapter {
             }
 
             let networkMonitor = NWPathMonitor()
-            networkMonitor.pathUpdateHandler = { [weak self] path in
+            networkMonitor.pathUpdateHandler = { [weak self = self] path in
                 self?.didReceivePathUpdate(path: path)
             }
             networkMonitor.start(queue: self.workQueue)
@@ -211,7 +214,7 @@ public class WireGuardAdapter {
 
     /// Stop the tunnel.
     /// - Parameter completionHandler: completion handler.
-    public func stop(completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
+    public func stop(completionHandler: @escaping @Sendable (WireGuardAdapterError?) -> Void) {
         workQueue.async {
             switch self.state {
             case .started(let handle, _):
@@ -238,7 +241,7 @@ public class WireGuardAdapter {
     /// - Parameters:
     ///   - tunnelConfiguration: tunnel configuration.
     ///   - completionHandler: completion handler.
-    public func update(tunnelConfiguration: TunnelConfiguration, completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
+    public func update(tunnelConfiguration: TunnelConfiguration, completionHandler: @escaping @Sendable (WireGuardAdapterError?) -> Void) {
         workQueue.async {
             if case .stopped = self.state {
                 completionHandler(.invalidState)
@@ -312,25 +315,19 @@ public class WireGuardAdapter {
     /// - Throws: an error of type `WireGuardAdapterError`.
     /// - Returns: `PacketTunnelSettingsGenerator`.
     private func setNetworkSettings(_ networkSettings: NEPacketTunnelNetworkSettings) throws {
-        var systemError: Error?
-        let condition = NSCondition()
-
-        // Activate the condition
-        condition.lock()
-        defer { condition.unlock() }
+        let result = LockedValue<Error?>(nil)
+        let completed = DispatchSemaphore(value: 0)
 
         self.packetTunnelProvider?.setTunnelNetworkSettings(networkSettings) { error in
-            systemError = error
-            condition.signal()
+            result.withLock { $0 = error }
+            completed.signal()
         }
 
-        // Packet tunnel's `setTunnelNetworkSettings` times out in certain
-        // scenarios & never calls the given callback.
-        let setTunnelNetworkSettingsTimeout: TimeInterval = 5 // seconds
-
-        if condition.wait(until: Date().addingTimeInterval(setTunnelNetworkSettingsTimeout)) {
-            if let systemError = systemError {
-                throw WireGuardAdapterError.setNetworkSettings(systemError)
+        // Retain the existing bounded wait: NetworkExtension may omit its callback.
+        // A late callback owns its result storage and cannot race a returned stack variable.
+        if completed.wait(timeout: .now() + 5) == .success {
+            if let error = result.withLock({ $0 }) {
+                throw WireGuardAdapterError.setNetworkSettings(error)
             }
         } else {
             self.logHandler(.error, "setTunnelNetworkSettings timed out after 5 seconds; proceeding anyway")

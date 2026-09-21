@@ -49,7 +49,7 @@ class TunnelDetailTableViewController: UITableViewController {
         super.init(style: .grouped)
         loadSections()
         loadVisibleFields()
-        statusObservationToken = tunnel.observe(\.status) { [weak self] _, _ in
+        statusObservationToken = tunnel.observeOnMain(\.status) { [weak self] _, _ in
             guard let self = self else { return }
             if tunnel.status == .active {
                 self.startUpdatingRuntimeConfiguration()
@@ -58,7 +58,7 @@ class TunnelDetailTableViewController: UITableViewController {
                 self.stopUpdatingRuntimeConfiguration()
             }
         }
-        onDemandObservationToken = tunnel.observe(\.isActivateOnDemandEnabled) { [weak self] tunnel, _ in
+        onDemandObservationToken = tunnel.observeOnMain(\.isActivateOnDemandEnabled) { [weak self] tunnel, _ in
             // Handle On-Demand getting turned on/off outside of the app
             self?.onDemandViewModel = ActivateOnDemandViewModel(tunnel: tunnel)
             self?.updateActivateOnDemandFields()
@@ -128,7 +128,7 @@ class TunnelDetailTableViewController: UITableViewController {
     func startUpdatingRuntimeConfiguration() {
         reloadRuntimeConfiguration()
         reloadRuntimeConfigurationTimer?.invalidate()
-        let reloadTimer = Timer(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
+        let reloadTimer = Timer.forMainRunLoop(timeInterval: 1 /* second */, repeats: true) { [weak self] _ in
             self?.reloadRuntimeConfiguration()
         }
         reloadRuntimeConfigurationTimer = reloadTimer
@@ -374,13 +374,13 @@ extension TunnelDetailTableViewController {
         }
 
         update(cell: cell, with: tunnel)
-        cell.statusObservationToken = tunnel.observe(\.status) { [weak cell] tunnel, _ in
+        cell.statusObservationToken = tunnel.observeOnMain(\.status) { [weak cell] tunnel, _ in
             update(cell: cell, with: tunnel)
         }
-        cell.isOnDemandEnabledObservationToken = tunnel.observe(\.isActivateOnDemandEnabled) { [weak cell] tunnel, _ in
+        cell.isOnDemandEnabledObservationToken = tunnel.observeOnMain(\.isActivateOnDemandEnabled) { [weak cell] tunnel, _ in
             update(cell: cell, with: tunnel)
         }
-        cell.hasOnDemandRulesObservationToken = tunnel.observe(\.hasOnDemandRules) { [weak cell] tunnel, _ in
+        cell.hasOnDemandRulesObservationToken = tunnel.observeOnMain(\.hasOnDemandRules) { [weak cell] tunnel, _ in
             update(cell: cell, with: tunnel)
         }
 

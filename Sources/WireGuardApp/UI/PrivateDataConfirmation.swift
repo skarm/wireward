@@ -7,8 +7,9 @@ import LocalAuthentication
 import AppKit
 #endif
 
+@MainActor
 class PrivateDataConfirmation {
-    static func confirmAccess(to reason: String, _ after: @escaping () -> Void) {
+    static func confirmAccess(to reason: String, _ after: @escaping @MainActor () -> Void) {
         let context = LAContext()
 
         var error: NSError?

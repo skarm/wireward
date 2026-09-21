@@ -8,7 +8,14 @@ import WireGuardKitC
 #endif
 
 /// The class describing a private key used by WireGuard.
-public class PrivateKey: BaseKey {
+public final class PrivateKey: BaseKey {
+    public let rawValue: Data
+
+    public init?(rawValue: Data) {
+        guard rawValue.count == WG_KEY_LEN else { return nil }
+        self.rawValue = rawValue
+    }
+
     /// Derived public key
     public var publicKey: PublicKey {
         return rawValue.withUnsafeBytes { (privateKeyBufferPointer: UnsafeRawBufferPointer) -> PublicKey in
@@ -36,16 +43,29 @@ public class PrivateKey: BaseKey {
 }
 
 /// The class describing a public key used by WireGuard.
-public class PublicKey: BaseKey {}
-
-/// The class describing a pre-shared key used by WireGuard.
-public class PreSharedKey: BaseKey {}
-
-/// The base key implementation. Should not be used directly.
-public class BaseKey: RawRepresentable, Equatable, Hashable {
-    /// Raw key representation
+public final class PublicKey: BaseKey {
     public let rawValue: Data
 
+    public init?(rawValue: Data) {
+        guard rawValue.count == WG_KEY_LEN else { return nil }
+        self.rawValue = rawValue
+    }
+}
+
+/// The class describing a pre-shared key used by WireGuard.
+public final class PreSharedKey: BaseKey {
+    public let rawValue: Data
+
+    public init?(rawValue: Data) {
+        guard rawValue.count == WG_KEY_LEN else { return nil }
+        self.rawValue = rawValue
+    }
+}
+
+/// Shared operations for immutable, Sendable WireGuard key values.
+public protocol BaseKey: RawRepresentable, Equatable, Hashable, Sendable where RawValue == Data {}
+
+extension BaseKey {
     /// Hex encoded representation
     public var hexKey: String {
         return rawValue.withUnsafeBytes { (rawBufferPointer: UnsafeRawBufferPointer) -> String in
@@ -66,17 +86,8 @@ public class BaseKey: RawRepresentable, Equatable, Hashable {
         }
     }
 
-    /// Initialize the key with existing raw representation
-    required public init?(rawValue: Data) {
-        if rawValue.count == WG_KEY_LEN {
-            self.rawValue = rawValue
-        } else {
-            return nil
-        }
-    }
-
     /// Initialize the key with hex representation
-    public convenience init?(hexKey: String) {
+    public init?(hexKey: String) {
         var bytes = Data(repeating: 0, count: Int(WG_KEY_LEN))
         let success = bytes.withUnsafeMutableBytes { (bufferPointer: UnsafeMutableRawBufferPointer) -> Bool in
             return key_from_hex(bufferPointer.baseAddress!.assumingMemoryBound(to: UInt8.self), hexKey)
@@ -89,7 +100,7 @@ public class BaseKey: RawRepresentable, Equatable, Hashable {
     }
 
     /// Initialize the key with base64 representation
-    public convenience init?(base64Key: String) {
+    public init?(base64Key: String) {
         var bytes = Data(repeating: 0, count: Int(WG_KEY_LEN))
         let success = bytes.withUnsafeMutableBytes { (bufferPointer: UnsafeMutableRawBufferPointer) -> Bool in
             return key_from_base64(bufferPointer.baseAddress!.assumingMemoryBound(to: UInt8.self), base64Key)
@@ -101,7 +112,11 @@ public class BaseKey: RawRepresentable, Equatable, Hashable {
         }
     }
 
-    public static func == (lhs: BaseKey, rhs: BaseKey) -> Bool {
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(rawValue)
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
         return lhs.rawValue.withUnsafeBytes { (lhsBytes: UnsafeRawBufferPointer) -> Bool in
             return rhs.rawValue.withUnsafeBytes { (rhsBytes: UnsafeRawBufferPointer) -> Bool in
                 return key_eq(

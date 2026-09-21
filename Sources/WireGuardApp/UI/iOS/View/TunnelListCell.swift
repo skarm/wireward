@@ -8,19 +8,19 @@ class TunnelListCell: UITableViewCell {
         didSet {
             // Bind to the tunnel's name
             nameLabel.text = tunnel?.name ?? ""
-            nameObservationToken = tunnel?.observe(\.name) { [weak self] tunnel, _ in
+            nameObservationToken = tunnel?.observeOnMain(\.name) { [weak self] tunnel, _ in
                 self?.nameLabel.text = tunnel.name
             }
             // Bind to the tunnel's status
             update(from: tunnel, animated: false)
-            statusObservationToken = tunnel?.observe(\.status) { [weak self] tunnel, _ in
+            statusObservationToken = tunnel?.observeOnMain(\.status) { [weak self] tunnel, _ in
                 self?.update(from: tunnel, animated: true)
             }
             // Bind to tunnel's on-demand settings
-            isOnDemandEnabledObservationToken = tunnel?.observe(\.isActivateOnDemandEnabled) { [weak self] tunnel, _ in
+            isOnDemandEnabledObservationToken = tunnel?.observeOnMain(\.isActivateOnDemandEnabled) { [weak self] tunnel, _ in
                 self?.update(from: tunnel, animated: true)
             }
-            hasOnDemandRulesObservationToken = tunnel?.observe(\.hasOnDemandRules) { [weak self] tunnel, _ in
+            hasOnDemandRulesObservationToken = tunnel?.observeOnMain(\.hasOnDemandRules) { [weak self] tunnel, _ in
                 self?.update(from: tunnel, animated: true)
             }
         }
