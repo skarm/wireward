@@ -26,6 +26,9 @@ struct AdapterDependencies: Sendable {
     var disableRoaming: @Sendable (Int32) throws -> Void
     var runtimeConfiguration: @Sendable (Int32) throws -> String
     var timeoutNanoseconds: UInt64 = 5_000_000_000
+    var resolveConfiguration: @Sendable (PacketTunnelSettingsGenerator, Bool) async -> (String, [EndpointResolutionResult?]) = { generator, endpointsOnly in
+        await DNSResolver.run { endpointsOnly ? generator.endpointUapiConfiguration() : generator.uapiConfiguration() }
+    }
     var monitor: @Sendable (@escaping @Sendable (AdapterPathUpdate) -> Void) -> (@Sendable () -> Void) = { callback in
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { path in
@@ -62,9 +65,8 @@ actor TunnelLifecycle {
         phase = .starting
         do {
             let generator = try await makeGenerator(configuration)
+            let config = try await prepareConfiguration(generator)
             try await apply(generator)
-            let (config, results) = await DNSResolver.run { generator.uapiConfiguration() }
-            logResolution(results)
             handle = try dependencies.start(config)
             self.generator = generator
             phase = .running
@@ -106,13 +108,14 @@ actor TunnelLifecycle {
         dependencies.reasserting(true)
         defer { dependencies.reasserting(false) }
         var settingsApplied = false
+        var settingsAttempted = false
         do {
             let updated = try await makeGenerator(configuration)
+            let config = try await prepareConfiguration(updated)
+            settingsAttempted = true
             try await apply(updated)
             settingsApplied = true
             if let handle {
-                let (config, results) = await DNSResolver.run { updated.uapiConfiguration() }
-                logResolution(results)
                 let code = dependencies.update(handle, config)
                 guard code == 0 else {
                     let error = WireGuardAdapterError.updateWireGuardBackend(code)
@@ -129,6 +132,17 @@ actor TunnelLifecycle {
             if settingsUncertain || settingsApplied {
                 fail()
                 dependencies.cancelTunnel(error)
+            } else if settingsAttempted, let generator {
+                // The system reported failure, but may have partially changed
+                // routes/DNS. Restore the last confirmed settings before resuming.
+                do {
+                    try await apply(generator)
+                    phase = previousPhase
+                } catch {
+                    log(.error, "Network settings rollback failed: \(error)")
+                    fail()
+                    dependencies.cancelTunnel(error)
+                }
             } else {
                 phase = previousPhase
             }
@@ -173,6 +187,17 @@ actor TunnelLifecycle {
         return PacketTunnelSettingsGenerator(tunnelConfiguration: configuration, resolvedEndpoints: endpoints)
     }
 
+    private func prepareConfiguration(_ generator: PacketTunnelSettingsGenerator, endpointsOnly: Bool = false) async throws -> String {
+        let (config, results) = await dependencies.resolveConfiguration(generator, endpointsOnly)
+        logResolution(results)
+        let failures = results.compactMap { result -> DNSResolutionError? in
+            if case .failure(let error) = result { return error }
+            return nil
+        }
+        guard failures.isEmpty else { throw WireGuardAdapterError.dnsResolution(failures) }
+        return config
+    }
+
     private func startMonitor() {
         let id = UUID()
         monitorID = id
@@ -193,8 +218,7 @@ actor TunnelLifecycle {
             guard let generator else { return }
             if phase == .running, let handle {
                 if path.satisfiable {
-                    let (config, results) = await DNSResolver.run { generator.endpointUapiConfiguration() }
-                    logResolution(results)
+                    let config = try await prepareConfiguration(generator, endpointsOnly: true)
                     let code = dependencies.update(handle, config)
                     guard code == 0 else {
                         fail()
@@ -211,19 +235,25 @@ actor TunnelLifecycle {
             } else if phase == .paused && path.satisfiable {
                 phase = .starting
                 do {
+                    let config = try await prepareConfiguration(generator)
                     try await apply(generator)
-                    let (config, results) = await DNSResolver.run { generator.uapiConfiguration() }
-                    logResolution(results)
                     handle = try dependencies.start(config)
                     phase = .running
                 } catch {
                     log(.error, "Failed to resume backend: \(error.localizedDescription)")
+                    if case .dnsResolution = adapterError(error) {
+                        phase = .paused
+                        return
+                    }
                     fail()
                     dependencies.cancelTunnel(error)
                 }
             }
         } catch {
             log(.error, "Network change failed: \(error)")
+            // Resolution happens before touching backend state. Keep the last
+            // working endpoint if a transient DNS64 lookup fails during roaming.
+            if case .dnsResolution = adapterError(error), phase == .running { return }
             fail()
             dependencies.cancelTunnel(error)
         }

@@ -7,6 +7,7 @@ import XCTest
 private final class FakeAdapter: Sendable {
     struct Storage: Sendable {
         var events: [String] = []
+        var settingsNames: [String?] = []
         var callbacks: [@Sendable (Error?) -> Void] = []
         var paths: [@Sendable (AdapterPathUpdate) -> Void] = []
         var applied = 0
@@ -20,12 +21,21 @@ private final class FakeAdapter: Sendable {
     }
     var events: [String] { storage.withLock { $0.events } }
     func event(_ value: String) { storage.withLock { $0.events.append(value) } }
-    func takeCallback() -> @Sendable (Error?) -> Void { storage.withLock { $0.callbacks.removeFirst() } }
+    func takeCallback() -> @Sendable (Error?) -> Void {
+        storage.withLock { state in
+            guard !state.callbacks.isEmpty else {
+                XCTFail("Expected a pending network settings callback")
+                return { _ in }
+            }
+            return state.callbacks.removeFirst()
+        }
+    }
     func dependencies(timeout: UInt64 = 2_000_000_000) -> AdapterDependencies {
         var dependencies = AdapterDependencies(
-            applySettings: { [self] _, completion in
+            applySettings: { [self] generator, completion in
                 let index = storage.withLock { state in
                     state.events.append("settings")
+                    state.settingsNames.append(generator.tunnelConfiguration.name)
                     state.callbacks.append(completion)
                     defer { state.applied += 1 }
                     return state.applied
@@ -282,6 +292,112 @@ final class AdapterLifecycleTests: XCTestCase {
         await fulfillment(of: [read, stopped], timeout: 1)
         let state = await adapter.lifecycleState
         XCTAssertEqual(state, .stopped)
+    }
+
+    func testRejectedSettingsRestoreLastConfirmedConfiguration() async throws {
+        let fake = FakeAdapter(requests: 3)
+        let adapter = WireGuardAdapter(dependencies: fake.dependencies())
+        let original = try configuration()
+        var changed = original
+        changed.name = "updated"
+        let started = expectation(description: "started")
+        adapter.start(tunnelConfiguration: original) { error in XCTAssertNil(error); started.fulfill() }
+        await fulfillment(of: [fake.requested[0]], timeout: 1)
+        fake.takeCallback()(nil)
+        await fulfillment(of: [started], timeout: 1)
+        let updated = expectation(description: "update reports original failure after rollback")
+        adapter.update(tunnelConfiguration: changed) { error in
+            guard case .setNetworkSettings(let underlying)? = error else { XCTFail("missing settings error"); updated.fulfill(); return }
+            XCTAssertEqual((underlying as NSError).code, 17)
+            updated.fulfill()
+        }
+        await fulfillment(of: [fake.requested[1]], timeout: 1)
+        fake.takeCallback()(NSError(domain: "test", code: 17))
+        await fulfillment(of: [fake.requested[2]], timeout: 1)
+        XCTAssertEqual(fake.storage.withLock { $0.settingsNames }, ["test", "updated", "test"])
+        XCTAssertFalse(fake.events.contains("update"))
+        fake.takeCallback()(nil)
+        await fulfillment(of: [updated], timeout: 1)
+        let state = await adapter.lifecycleState
+        XCTAssertEqual(state, .running)
+        XCTAssertFalse(fake.events.contains("cancel"))
+        XCTAssertEqual(fake.events.last, "reasserting:false")
+    }
+
+    func testRollbackFailureStopsTunnel() async throws {
+        let fake = FakeAdapter(requests: 3)
+        let adapter = WireGuardAdapter(dependencies: fake.dependencies())
+        let started = expectation(description: "started")
+        adapter.start(tunnelConfiguration: try configuration()) { _ in started.fulfill() }
+        await fulfillment(of: [fake.requested[0]], timeout: 1)
+        fake.takeCallback()(nil)
+        await fulfillment(of: [started], timeout: 1)
+        let updated = expectation(description: "failed safely")
+        adapter.update(tunnelConfiguration: try configuration()) { error in XCTAssertNotNil(error); updated.fulfill() }
+        await fulfillment(of: [fake.requested[1]], timeout: 1)
+        fake.takeCallback()(NSError(domain: "test", code: 17))
+        await fulfillment(of: [fake.requested[2]], timeout: 1)
+        fake.takeCallback()(NSError(domain: "test", code: 18))
+        await fulfillment(of: [updated, fake.closed], timeout: 1)
+        let state = await adapter.lifecycleState
+        XCTAssertEqual(state, .failed)
+        XCTAssertTrue(fake.events.contains("cancel"))
+        XCTAssertFalse(fake.events.contains("update"))
+    }
+
+    func testRoamingDNSFailureKeepsExistingBackend() async throws {
+        let fake = FakeAdapter()
+        var dependencies = fake.dependencies()
+        dependencies.pathBehavior = .pauseAndReconnect
+        dependencies.resolveConfiguration = { generator, endpointsOnly in
+            if endpointsOnly { return ("", [.failure(DNSResolutionError(errorCode: EAI_AGAIN, address: "example.invalid"))]) }
+            return generator.uapiConfiguration()
+        }
+        let adapter = WireGuardAdapter(dependencies: dependencies)
+        let started = expectation(description: "started")
+        adapter.start(tunnelConfiguration: try configuration()) { error in XCTAssertNil(error); started.fulfill() }
+        await fulfillment(of: [fake.requested[0]], timeout: 1)
+        fake.takeCallback()(nil)
+        await fulfillment(of: [started], timeout: 1)
+        fake.storage.withLock { $0.paths[0] }(AdapterPathUpdate(satisfiable: true, description: "network handover"))
+        let barrier = expectation(description: "path handled")
+        adapter.getRuntimeConfiguration { value in XCTAssertEqual(value, "test-config"); barrier.fulfill() }
+        await fulfillment(of: [barrier], timeout: 1)
+        XCTAssertFalse(fake.events.contains("stop"))
+        XCTAssertFalse(fake.events.contains("update"))
+        XCTAssertFalse(fake.events.contains("cancel"))
+        let state = await adapter.lifecycleState
+        XCTAssertEqual(state, .running)
+    }
+
+    func testDNSFailureBeforeUpdateDoesNotChangeNetworkSettings() async throws {
+        let fake = FakeAdapter()
+        var dependencies = fake.dependencies()
+        dependencies.resolveConfiguration = { generator, _ in
+            if generator.tunnelConfiguration.name == "updated" {
+                return ("", [.failure(DNSResolutionError(errorCode: EAI_AGAIN, address: "example.invalid"))])
+            }
+            return generator.uapiConfiguration()
+        }
+        let adapter = WireGuardAdapter(dependencies: dependencies)
+        let started = expectation(description: "started")
+        var configuration = try configuration()
+        adapter.start(tunnelConfiguration: configuration) { error in XCTAssertNil(error); started.fulfill() }
+        await fulfillment(of: [fake.requested[0]], timeout: 1)
+        fake.takeCallback()(nil)
+        await fulfillment(of: [started], timeout: 1)
+        configuration.name = "updated"
+        let updated = expectation(description: "DNS failed")
+        adapter.update(tunnelConfiguration: configuration) { error in
+            guard case .dnsResolution? = error else { XCTFail("missing DNS error"); updated.fulfill(); return }
+            updated.fulfill()
+        }
+        await fulfillment(of: [updated], timeout: 1)
+        XCTAssertEqual(fake.storage.withLock { $0.settingsNames }, ["test"])
+        XCTAssertFalse(fake.events.contains("update"))
+        XCTAssertFalse(fake.events.contains("stop"))
+        let state = await adapter.lifecycleState
+        XCTAssertEqual(state, .running)
     }
 
     func testCallbackWaitCancellationWinsOverLateCompletion() async throws {

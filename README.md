@@ -98,9 +98,17 @@ Generate keys with `try PrivateKey()` and handle RNG failure. Generation runs in
 
 `WireGuardAdapter` is a checked `Sendable` type. An actor owns its lifecycle state, and a single asynchronous operation queue preserves submission order across DNS resolution and NetworkExtension callbacks. Read `await adapter.lifecycleState` for the current phase. The existing callback API remains available; callbacks do not run on the main actor unless the caller explicitly transfers them there.
 
-Applying network settings has a five-second deadline. A timeout fails the operation instead of starting a backend with unconfirmed routes. Because NetworkExtension cannot cancel that request, the timed-out adapter refuses further starts; recovery requires ending the provider session. Duplicate or late callbacks cannot resume an operation twice. A backend configuration error during an update stops the tunnel instead of reporting success with inconsistent routes and peers; transactional rollback remains future work.
+Applying network settings has a five-second deadline. A timeout fails the operation instead of starting a backend with unconfirmed routes. Because NetworkExtension cannot cancel that request, the timed-out adapter refuses further starts; recovery requires ending the provider session. Duplicate or late callbacks cannot resume an operation twice. A backend configuration error during an update stops the tunnel instead of reporting success with inconsistent routes and peers; restoring a backend after a partially applied UAPI update remains future work.
+
+DNS preparation completes before changing network settings. If applying new settings returns an error, the adapter restores the last confirmed routes/DNS before reporting failure. Failed rollback stops the tunnel. A timeout cannot safely trigger rollback because the original system request is still outstanding. During a network change, a temporary endpoint resolution failure leaves the existing backend configuration intact. Resolver tests cover malformed/empty results, DNS64 address selection, and IPv6 interface scope; real IPv6-only/NAT64 connectivity remains unverified.
 
 The package's `WireGuardKit` target treats warnings as errors. The application targets still have legacy UI and Keychain deprecation warnings; a project-wide warnings-as-errors gate is pending. Lifecycle unit tests cover callback races, operation ordering, timeouts, backend errors, stale network events, mobile pause/resume, and cleanup. These tests use platform substitutes and do not replace signed tunnel and device testing.
+
+## Configuration persistence
+
+Keychain replacement keeps the previous item until NetworkExtension confirms the new profile was saved. Failed saves restore the in-memory profile and discard only the new item. Removing a profile deletes its Keychain item only after removal succeeds. Legacy inline migration retains the original configuration if Keychain access or saving fails; startup migrations finish before profiles can be edited. Canonical iOS reference migration does not delete the shared item behind the old and new reference values.
+
+Reload errors retain the current tunnel list, and an unchanged persistent reference preserves its cached configuration when Keychain reads are temporarily unavailable. Startup no longer automatically removes profiles or sweeps Keychain items from a snapshot. An interrupted save can therefore leave an unused item; cleanup requires reconciling confirmed references first. The internal `ConfigurationStore` test target verifies commit/rollback ownership with an in-memory store; signed Keychain/NetworkExtension integration testing is still pending.
 
 ## Go bridge ABI
 
