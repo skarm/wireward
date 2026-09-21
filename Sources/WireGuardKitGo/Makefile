@@ -20,7 +20,7 @@ BRIDGE_INPUTS := go.mod go.sum $(wildcard *.go) wireguard.h module.modulemap \
 	goruntime-boottime-over-monotonic.diff Makefile $(wildcard build-bridge/*.go) \
 	../../.go-version ../../.xcode-version
 HOST_GO = /usr/bin/env -u GOROOT -u GOOS -u GOARCH -u GOEXPERIMENT \
-	-u GOAMD64 -u GOARM64 CGO_ENABLED=0 "$(GO)"
+	-u GOAMD64 -u GOARM64 -u GO_EXTLINK_ENABLED GOFIPS140=off CGO_ENABLED=0 "$(GO)"
 
 .PHONY: xcframework build test
 xcframework build: $(BRIDGE_INPUTS)
