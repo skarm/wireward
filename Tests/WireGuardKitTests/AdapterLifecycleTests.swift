@@ -345,7 +345,7 @@ final class AdapterLifecycleTests: XCTestCase {
         XCTAssertFalse(fake.events.contains("update"))
     }
 
-    func testRoamingDNSFailureKeepsExistingBackend() async throws {
+    func testRoamingDNSFailureKeepsEndpointsAndRebindsSockets() async throws {
         let fake = FakeAdapter()
         var dependencies = fake.dependencies()
         dependencies.pathBehavior = .pauseAndReconnect
@@ -366,8 +366,34 @@ final class AdapterLifecycleTests: XCTestCase {
         XCTAssertFalse(fake.events.contains("stop"))
         XCTAssertFalse(fake.events.contains("update"))
         XCTAssertFalse(fake.events.contains("cancel"))
+        XCTAssertEqual(fake.events, ["settings", "start", "roaming", "bump"])
         let state = await adapter.lifecycleState
         XCTAssertEqual(state, .running)
+    }
+
+    func testRebindFailureAfterRoamingDNSFailureStopsTunnel() async throws {
+        let fake = FakeAdapter()
+        var dependencies = fake.dependencies()
+        dependencies.pathBehavior = .pauseAndReconnect
+        dependencies.resolveConfiguration = { generator, endpointsOnly in
+            if endpointsOnly { return ("", [.failure(DNSResolutionError(errorCode: EAI_AGAIN, address: "example.invalid"))]) }
+            return generator.uapiConfiguration()
+        }
+        dependencies.bumpSockets = { _ in throw WireGuardAdapterError.backendOperation("bumpSockets", -9) }
+        let adapter = WireGuardAdapter(dependencies: dependencies)
+        let started = expectation(description: "started")
+        adapter.start(tunnelConfiguration: try configuration()) { error in XCTAssertNil(error); started.fulfill() }
+        await fulfillment(of: [fake.requested[0]], timeout: 1)
+        fake.takeCallback()(nil)
+        await fulfillment(of: [started], timeout: 1)
+        fake.storage.withLock { $0.paths[0] }(AdapterPathUpdate(satisfiable: true, description: "network handover"))
+        let barrier = expectation(description: "path handled")
+        adapter.getRuntimeConfiguration { value in XCTAssertNil(value); barrier.fulfill() }
+        await fulfillment(of: [barrier, fake.closed], timeout: 1)
+        XCTAssertFalse(fake.events.contains("update"))
+        XCTAssertTrue(fake.events.contains("cancel"))
+        let state = await adapter.lifecycleState
+        XCTAssertEqual(state, .failed)
     }
 
     func testDNSFailureBeforeUpdateDoesNotChangeNetworkSettings() async throws {

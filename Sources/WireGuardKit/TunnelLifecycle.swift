@@ -218,12 +218,18 @@ actor TunnelLifecycle {
             guard let generator else { return }
             if phase == .running, let handle {
                 if path.satisfiable {
-                    let config = try await prepareConfiguration(generator, endpointsOnly: true)
-                    let code = dependencies.update(handle, config)
-                    guard code == 0 else {
-                        fail()
-                        dependencies.cancelTunnel(WireGuardAdapterError.updateWireGuardBackend(code))
-                        return
+                    do {
+                        let config = try await prepareConfiguration(generator, endpointsOnly: true)
+                        let code = dependencies.update(handle, config)
+                        guard code == 0 else {
+                            fail()
+                            dependencies.cancelTunnel(WireGuardAdapterError.updateWireGuardBackend(code))
+                            return
+                        }
+                    } catch WireGuardAdapterError.dnsResolution {
+                        // Keep the previous endpoints, but still move the UDP
+                        // sockets off the old path and send keepalives.
+                        log(.error, "Keeping previous endpoints after DNS resolution failed during network change")
                     }
                     try dependencies.disableRoaming(handle)
                     try dependencies.bumpSockets(handle)
@@ -251,9 +257,6 @@ actor TunnelLifecycle {
             }
         } catch {
             log(.error, "Network change failed: \(error)")
-            // Resolution happens before touching backend state. Keep the last
-            // working endpoint if a transient DNS64 lookup fails during roaming.
-            if case .dnsResolution = adapterError(error), phase == .running { return }
             fail()
             dependencies.cancelTunnel(error)
         }
