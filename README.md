@@ -1,28 +1,36 @@
-# [WireGuard](https://www.wireguard.com/) for iOS and macOS
+# Wireward for iOS and macOS
 
-This project contains an application for iOS and for macOS, as well as many components shared between the two of them. You may toggle between the two platforms by selecting the target from within Xcode.
+Wireward is a fork of [WireGuard/wireguard-apple](https://github.com/WireGuard/wireguard-apple), the [WireGuard](https://www.wireguard.com/) client for iOS and macOS.
+
+The official upstream repository is [git.zx2c4.com/wireguard-apple](https://git.zx2c4.com/wireguard-apple). The GitHub mirror is also used to review community contributions.
+
+This project contains applications for iOS and macOS, along with shared components. The `WireGuardKit` package name and existing Xcode target names are retained.
 
 ## Building
+
+The current build baseline uses Xcode 27.0, Swift 5 language mode, and Go 1.19.13. The iOS and macOS applications and Network Extensions have been built as unsigned Debug arm64 binaries. Real-device tunnel validation is pending.
 
 - Clone this repo:
 
 ```
-$ git clone https://git.zx2c4.com/wireguard-apple
-$ cd wireguard-apple
+$ git clone https://github.com/skarm/wireward.git
+$ cd wireward
 ```
 
-- Rename and populate developer team ID file:
+- Copy and populate the developer configuration file:
 
 ```
 $ cp Sources/WireGuardApp/Config/Developer.xcconfig.template Sources/WireGuardApp/Config/Developer.xcconfig
 $ vim Sources/WireGuardApp/Config/Developer.xcconfig
 ```
 
-- Install swiftlint and go 1.19:
+- Install SwiftLint:
 
 ```
-$ brew install swiftlint go
+$ brew install swiftlint
 ```
+
+- Install [Go 1.19.13](https://go.dev/dl/#go1.19.13) and ensure its `bin` directory is first on `PATH` in the build environment. Confirm that `go version` reports `go1.19.13`.
 
 - Open project in Xcode:
 
@@ -30,14 +38,14 @@ $ brew install swiftlint go
 $ open WireGuard.xcodeproj
 ```
 
-- Flip switches, press buttons, and make whirling noises until Xcode builds it.
+- Select the `WireGuardiOS` or `WireGuardmacOS` scheme, configure signing for the application and Network Extension targets, and build.
 
 ## WireGuardKit integration
 
 1. Open your Xcode project and add the Swift package with the following URL:
    
    ```
-   https://git.zx2c4.com/wireguard-apple
+   https://github.com/skarm/wireward.git
    ```
    
 2. `WireGuardKit` links against `wireguard-go-bridge` library, but it cannot build it automatically
@@ -54,7 +62,7 @@ $ open WireGuard.xcodeproj
      the "External Build Tool Configuration":
      
      ```
-     ${BUILD_DIR%Build/*}SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo
+     ${BUILD_DIR%Build/*}SourcePackages/checkouts/wireward/Sources/WireGuardKitGo
      ```
      
    - Switch to "Build Settings" and find `SDKROOT`.
