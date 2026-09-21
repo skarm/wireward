@@ -215,7 +215,12 @@ extension TunnelEditTableViewController {
         cell.onTapped = { [weak self] in
             guard let self = self else { return }
 
-            self.tunnelViewModel.interfaceData[.privateKey] = PrivateKey().base64Key
+            do {
+                self.tunnelViewModel.interfaceData[.privateKey] = try PrivateKey().base64Key
+            } catch {
+                ErrorPresenter.showErrorAlert(title: tr("alertKeyGenerationFailureTitle"), message: error.localizedDescription, from: self)
+                return
+            }
             if let privateKeyRow = self.interfaceFieldsBySection[indexPath.section].firstIndex(of: .privateKey),
                 let publicKeyRow = self.interfaceFieldsBySection[indexPath.section].firstIndex(of: .publicKey) {
                 let privateKeyIndex = IndexPath(row: privateKeyRow, section: indexPath.section)

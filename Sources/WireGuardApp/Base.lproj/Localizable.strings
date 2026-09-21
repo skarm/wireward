@@ -452,3 +452,5 @@
 // Donation
 
 "donateLink" = "♥ Donate to the WireGuard Project";
+
+"alertKeyGenerationFailureTitle" = "Unable to generate private key";

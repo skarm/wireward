@@ -90,6 +90,7 @@ class TunnelEditViewController: NSViewController {
     var singlePeerAllowedIPsObservationToken: AnyObject?
 
     var dnsServersAddedToAllowedIPs: String?
+    private var keyGenerationFailure: String?
 
     init(tunnelsManager: TunnelsManager, tunnel: TunnelContainer?) {
         self.tunnelsManager = tunnelsManager
@@ -115,10 +116,14 @@ class TunnelEditViewController: NSViewController {
             dnsServersAddedToAllowedIPs = excludePrivateIPsCheckbox.state == .on ? tunnelConfiguration.interface.dns.map { $0.stringRepresentation }.joined(separator: ", ") : nil
         } else {
             // Creating a new tunnel
-            let privateKey = PrivateKey()
-            let bootstrappingText = "[Interface]\nPrivateKey = \(privateKey.base64Key)\n"
-            publicKeyRow.value = privateKey.publicKey.base64Key
-            textView.string = bootstrappingText
+            do {
+                let privateKey = try PrivateKey()
+                textView.string = "[Interface]\nPrivateKey = \(privateKey.base64Key)\n"
+                publicKeyRow.value = privateKey.publicKey.base64Key
+            } catch {
+                keyGenerationFailure = error.localizedDescription
+                saveButton.isEnabled = false
+            }
             updateExcludePrivateIPsVisibility(singlePeerAllowedIPs: nil)
             dnsServersAddedToAllowedIPs = nil
         }
@@ -141,6 +146,14 @@ class TunnelEditViewController: NSViewController {
             MainActor.assumeIsolated {
                 self?.updateExcludePrivateIPsVisibility(singlePeerAllowedIPs: textView.singlePeerAllowedIPs)
             }
+        }
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        if let message = keyGenerationFailure {
+            keyGenerationFailure = nil
+            ErrorPresenter.showErrorAlert(title: tr("alertKeyGenerationFailureTitle"), message: message, from: self)
         }
     }
 

@@ -31,12 +31,19 @@ public final class PrivateKey: BaseKey {
         }
     }
 
-    /// Initialize new private key
-    convenience public init() {
+    /// Generate a new private key, propagating failure from the system RNG.
+    convenience public init() throws {
+        try self.init(generate: { curve25519_generate_private_key($0) })
+    }
+
+    convenience init(generate: (UnsafeMutablePointer<UInt8>) -> Int32) throws {
         var privateKeyData = Data(repeating: 0, count: Int(WG_KEY_LEN))
-        privateKeyData.withUnsafeMutableBytes { (rawBufferPointer: UnsafeMutableRawBufferPointer) in
-            let privateKeyBytes = rawBufferPointer.baseAddress!.assumingMemoryBound(to: UInt8.self)
-            curve25519_generate_private_key(privateKeyBytes)
+        let status = privateKeyData.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) in
+            generate(buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        }
+        guard status == 0 else {
+            privateKeyData.resetBytes(in: 0..<privateKeyData.count)
+            throw PrivateKeyGenerationError.randomBytes(status)
         }
         self.init(rawValue: privateKeyData)!
     }
@@ -88,6 +95,7 @@ extension BaseKey {
 
     /// Initialize the key with hex representation
     public init?(hexKey: String) {
+        guard hexKey.utf8.count == Int(WG_KEY_LEN_HEX) - 1 else { return nil }
         var bytes = Data(repeating: 0, count: Int(WG_KEY_LEN))
         let success = bytes.withUnsafeMutableBytes { (bufferPointer: UnsafeMutableRawBufferPointer) -> Bool in
             return key_from_hex(bufferPointer.baseAddress!.assumingMemoryBound(to: UInt8.self), hexKey)
@@ -101,6 +109,7 @@ extension BaseKey {
 
     /// Initialize the key with base64 representation
     public init?(base64Key: String) {
+        guard base64Key.utf8.count == Int(WG_KEY_LEN_BASE64) - 1 else { return nil }
         var bytes = Data(repeating: 0, count: Int(WG_KEY_LEN))
         let success = bytes.withUnsafeMutableBytes { (bufferPointer: UnsafeMutableRawBufferPointer) -> Bool in
             return key_from_base64(bufferPointer.baseAddress!.assumingMemoryBound(to: UInt8.self), base64Key)
@@ -124,6 +133,17 @@ extension BaseKey {
                     rhsBytes.baseAddress!.assumingMemoryBound(to: UInt8.self)
                 )
             }
+        }
+    }
+}
+
+public enum PrivateKeyGenerationError: LocalizedError {
+    case randomBytes(Int32)
+
+    public var errorDescription: String? {
+        switch self {
+        case .randomBytes(let code):
+            return "The system random number generator could not create a private key (error \(code))."
         }
     }
 }

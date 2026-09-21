@@ -24,13 +24,14 @@ class MockTunnels {
     static let allowedIPs = "0.0.0.0/0"
 
     static func createMockTunnels() -> [NETunnelProviderManager] {
-        return tunnelNames.map { tunnelName -> NETunnelProviderManager in
+        return tunnelNames.compactMap { tunnelName -> NETunnelProviderManager? in
 
-            var interface = InterfaceConfiguration(privateKey: PrivateKey())
+            guard let privateKey = try? PrivateKey(), let peerKey = try? PrivateKey() else { return nil }
+            var interface = InterfaceConfiguration(privateKey: privateKey)
             interface.addresses = [IPAddressRange(from: String(format: address, Int.random(in: 1 ... 10), Int.random(in: 1 ... 254)))!]
             interface.dns = dnsServers.map { DNSServer(from: $0)! }
 
-            var peer = PeerConfiguration(publicKey: PrivateKey().publicKey)
+            var peer = PeerConfiguration(publicKey: peerKey.publicKey)
             peer.endpoint = Endpoint(from: endpoint)
             peer.allowedIPs = [IPAddressRange(from: allowedIPs)!]
 
