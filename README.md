@@ -4,7 +4,7 @@ Wireward is a fork of [WireGuard/wireguard-apple](https://github.com/WireGuard/w
 
 The official upstream repository is [git.zx2c4.com/wireguard-apple](https://git.zx2c4.com/wireguard-apple). The GitHub mirror is also used to review community contributions.
 
-This project contains applications for iOS and macOS, along with shared components. The `WireGuardKit` package name and existing Xcode target names are retained.
+This project contains applications for iOS and macOS, along with shared components. The `WireGuardKit` package name and existing application and Network Extension target names are retained.
 
 ## Building
 
@@ -30,7 +30,19 @@ $ vim Sources/WireGuardApp/Config/Developer.xcconfig
 $ brew install swiftlint
 ```
 
-- Install [Go 1.27.1](https://go.dev/dl/#go1.27.1). Set `GO` in `Developer.xcconfig` to the absolute path of its executable (for example, `GO = /opt/homebrew/bin/go`), or pass `GO=/absolute/path/to/go` to `xcodebuild` / `make`. The bridge rejects other Go versions and disables automatic toolchain switching.
+- Install [Go 1.27.1](https://go.dev/dl/#go1.27.1), then build the Go bridge from the repository root:
+
+```sh
+make -C Sources/WireGuardKitGo xcframework GO=/absolute/path/to/go
+```
+
+This command produces `Artifacts/WireGuardKitGo.xcframework`, `Artifacts/wireguard-go-version.h`, and `Artifacts/WireGuardKitGo.build.json`. Xcode and Swift Package Manager consume this local artifact. Re-run the command after changing the bridge sources, dependencies, runtime patch, or toolchain; cached slices are reused when their inputs match.
+
+The XCFramework contains macOS arm64/x86_64, iOS arm64, and iOS Simulator arm64/x86_64. Deployment targets default to macOS 13 and iOS 15. To build only Apple silicon slices, pass `MACOS_ARCHS=arm64 SIMULATOR_ARCHS=arm64`. `MACOS_DEPLOYMENT_TARGET` and `IOS_DEPLOYMENT_TARGET` can raise the minimum versions. `CACHE_DIR` and `OUTPUT_DIR` override the default locations; the app and package expect `Artifacts` unless you update their references.
+
+The driver requires the versions recorded in `.go-version` and `.xcode-version`, uses the selected Xcode's SDKs and Clang, and disables automatic Go toolchain switching. `GO` must be an absolute path; it defaults to the official install location `/usr/local/go/bin/go`. No Homebrew PATH is added. `DEVELOPER_DIR` can select an Xcode installation.
+
+The cache key includes toolchain and SDK identities, architectures, deployment targets, source files, dependency manifests, build code, and the runtime patch. Cached archives are checked by SHA-256. The Darwin clock patch is applied to three runtime source files through a Go overlay; the installed GOROOT is left intact. The build manifest records these inputs and the archive checksums. Generated artifacts and caches are ignored by Git.
 
 - Open project in Xcode:
 
@@ -42,21 +54,20 @@ $ open WireGuard.xcodeproj
 
 ## Tests
 
-On Apple silicon, build the macOS bridge and run the package tests:
+Build the XCFramework first, then run the Swift package and build-driver tests:
 
 ```sh
-xcodebuild -project WireGuard.xcodeproj -scheme WireGuardmacOS -configuration Debug \
-  -sdk macosx -destination 'generic/platform=macOS' -derivedDataPath build/macos \
-  CODE_SIGNING_ALLOWED=NO ARCHS=arm64 GO="$(command -v go)" build
-swift test --enable-xctest -Xlinker -Lbuild/macos/Build/Products/Debug
+make -C Sources/WireGuardKitGo xcframework GO=/absolute/path/to/go
+make -C Sources/WireGuardKitGo test GO=/absolute/path/to/go
+swift test --enable-xctest
 ```
 
-Add `--sanitize thread` to the Swift test command to check synchronization. Run upstream Go tests with the manifest kept read-only:
+Add `--sanitize thread` to the Swift test command to check synchronization. Run upstream Go tests:
 
 ```sh
 cd Sources/WireGuardKitGo
 GOTOOLCHAIN=local go mod download github.com/google/btree # Upstream netstack test checksum
-GOTOOLCHAIN=local go test -mod=readonly -race ./... golang.zx2c4.com/wireguard/...
+GOTOOLCHAIN=local go test -race ./... golang.zx2c4.com/wireguard/...
 ```
 
 ## Backend dependencies
@@ -73,49 +84,9 @@ Update these dependencies explicitly, resolve WireGuard `master` and gVisor `go`
 
 ## WireGuardKit integration
 
-1. Open your Xcode project and add the Swift package with the following URL:
-   
-   ```
-   https://github.com/skarm/wireward.git
-   ```
-   
-2. `WireGuardKit` links against `wireguard-go-bridge` library, but it cannot build it automatically
-   due to Swift package manager limitations. So it needs a little help from a developer. 
-   Please follow the instructions below to create a build target(s) for `wireguard-go-bridge`.
-   
-   - In Xcode, click File -> New -> Target. Switch to "Other" tab and choose "External Build 
-     System".
-   - Type in `WireGuardGoBridge<PLATFORM>` under the "Product name", replacing the `<PLATFORM>` 
-     placeholder with the name of the platform. For example, when targeting macOS use `macOS`, or 
-     when targeting iOS use `iOS`.
-     Make sure the build tool is set to: `/usr/bin/make` (default).
-   - In the appeared "Info" tab of a newly created target, type in the "Directory" path under 
-     the "External Build Tool Configuration":
-     
-     ```
-     ${BUILD_DIR%Build/*}SourcePackages/checkouts/wireward/Sources/WireGuardKitGo
-     ```
-     
-   - Switch to "Build Settings" and find `SDKROOT`.
-     Type in `macosx` if you target macOS, or type in `iphoneos` if you target iOS.
-   
-3. Go to Xcode project settings and locate your network extension target and switch to 
-   "Build Phases" tab.
-   
-   - Locate "Dependencies" section and hit "+" to add `WireGuardGoBridge<PLATFORM>` replacing 
-     the `<PLATFORM>` placeholder with the name of platform matching the network extension 
-     deployment target (i.e macOS or iOS).
-     
-   - Locate the "Link with binary libraries" section and hit "+" to add `WireGuardKit`.
-   
-4. In Xcode project settings, locate your main bundle app and switch to "Build Phases" tab. 
-   Locate the "Link with binary libraries" section and hit "+" to add `WireGuardKit`.
-   
-5. iOS only: Locate Bitcode settings under your application target, Build settings -> Enable Bitcode, 
-   change the corresponding value to "No".
-   
-Note that if you ship your app for both iOS and macOS, make sure to repeat the steps 2-4 twice, 
-once per platform.
+Clone [skarm/wireward](https://github.com/skarm/wireward), build the XCFramework with the command above, and add this checkout as a **local Swift package** in Xcode. Link the `WireGuardKit` product to your application and Network Extension targets. The package's binary target supplies the Go library and headers for the selected platform; no External Build System target or manual library search path is required.
+
+The generated XCFramework is not checked into Git. Adding the GitHub URL directly as a remote package requires a published binary artifact and checksum, which this repository does not provide yet.
 
 ## MIT License
 
