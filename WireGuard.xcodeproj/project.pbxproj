@@ -213,6 +213,8 @@
 		A6C0DE000000000000000002 /* AsyncOperationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C0DE000000000000000000 /* AsyncOperationQueue.swift */; };
 		A6C0DE000000000000000011 /* TunnelLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C0DE000000000000000010 /* TunnelLifecycle.swift */; };
 		A6C0DE000000000000000012 /* TunnelLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C0DE000000000000000010 /* TunnelLifecycle.swift */; };
+		A6C0DE000000000000000021 /* ConfigurationTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C0DE000000000000000020 /* ConfigurationTransaction.swift */; };
+		A6C0DE000000000000000022 /* ConfigurationTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C0DE000000000000000020 /* ConfigurationTransaction.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -437,6 +439,7 @@
 		F4D4E3B631DE428784AB0000 /* LockedValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockedValue.swift; sourceTree = "<group>"; };
 		A6C0DE000000000000000000 /* AsyncOperationQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsyncOperationQueue.swift; sourceTree = "<group>"; };
 		A6C0DE000000000000000010 /* TunnelLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelLifecycle.swift; sourceTree = "<group>"; };
+		A6C0DE000000000000000020 /* ConfigurationTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationStore/ConfigurationTransaction.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -584,6 +587,7 @@
 				6FF3526A21C23F720008484E /* Logging */,
 				6F7774E6217201E0006A79B3 /* Model */,
 				6F5A2B4421AFDE020081EDD8 /* FileManager+Extension.swift */,
+				A6C0DE000000000000000020 /* ConfigurationTransaction.swift */,
 				6B5C5E26220A48D30024272E /* Keychain.swift */,
 				58233BCE2591F842002060A8 /* NotificationToken.swift */,
 			);
@@ -1238,6 +1242,7 @@
 				6FB1BDD421D50F5300A991BF /* ioapi.c in Sources */,
 				6FDB3C3C21DCF6BB00A0C0BF /* TunnelViewModel.swift in Sources */,
 				6FDB6D13224A15BF00EE4BC3 /* LogViewController.swift in Sources */,
+				A6C0DE000000000000000021 /* ConfigurationTransaction.swift in Sources */,
 				6B5C5E29220A48D30024272E /* Keychain.swift in Sources */,
 				6FCD99AF21E0EA1700BA4C82 /* ImportPanelPresenter.swift in Sources */,
 				6FB1BDD521D50F5300A991BF /* unzip.c in Sources */,
@@ -1359,6 +1364,7 @@
 				6FDEF80021863C0100D8FBF6 /* ioapi.c in Sources */,
 				6F7F7E5F21C7D74B00527607 /* TunnelErrors.swift in Sources */,
 				6FDEF7FC21863B6100D8FBF6 /* zip.c in Sources */,
+				A6C0DE000000000000000022 /* ConfigurationTransaction.swift in Sources */,
 				6B5C5E27220A48D30024272E /* Keychain.swift in Sources */,
 				6F628C3D217F09E9003482A3 /* TunnelViewModel.swift in Sources */,
 				5F4541A621C4449E00994C13 /* ButtonCell.swift in Sources */,

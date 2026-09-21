@@ -5,6 +5,20 @@ import Foundation
 import Security
 
 class Keychain {
+    enum Failure: LocalizedError {
+        case status(OSStatus)
+        case invalidResult
+        case invalidAppConfiguration
+
+        var errorDescription: String? {
+            switch self {
+            case .status(let status): return "Keychain operation failed (status \(status))."
+            case .invalidResult: return "Keychain returned an invalid configuration reference."
+            case .invalidAppConfiguration: return "The application could not prepare Keychain access."
+            }
+        }
+    }
+
     static func openReference(called ref: Data) -> String? {
         var result: CFTypeRef?
         let ret = SecItemCopyMatching([kSecValuePersistentRef: ref,
@@ -18,11 +32,11 @@ class Keychain {
         return String(data: data, encoding: String.Encoding.utf8)
     }
 
-    static func makeReference(containing value: String, called name: String, previouslyReferencedBy oldRef: Data? = nil) -> Data? {
+    static func makeReference(containing value: String, called name: String) throws -> Data {
         var ret: OSStatus
         guard var bundleIdentifier = Bundle.main.bundleIdentifier else {
             wg_log(.error, staticMessage: "Unable to determine bundle identifier")
-            return nil
+            throw Failure.invalidAppConfiguration
         }
         if bundleIdentifier.hasSuffix(".network-extension") {
             bundleIdentifier.removeLast(".network-extension".count)
@@ -45,25 +59,25 @@ class Keychain {
 
         guard let extensionPath = Bundle.main.builtInPlugInsURL?.appendingPathComponent("WireGuardNetworkExtension.appex", isDirectory: true).path else {
             wg_log(.error, staticMessage: "Unable to determine app extension path")
-            return nil
+            throw Failure.invalidAppConfiguration
         }
         var extensionApp: SecTrustedApplication?
         var mainApp: SecTrustedApplication?
         ret = SecTrustedApplicationCreateFromPath(extensionPath, &extensionApp)
         if ret != kOSReturnSuccess || extensionApp == nil {
             wg_log(.error, message: "Unable to create keychain extension trusted application object: \(ret)")
-            return nil
+            throw ret == errSecSuccess ? Failure.invalidResult : Failure.status(ret)
         }
         ret = SecTrustedApplicationCreateFromPath(nil, &mainApp)
         if ret != errSecSuccess || mainApp == nil {
             wg_log(.error, message: "Unable to create keychain local trusted application object: \(ret)")
-            return nil
+            throw ret == errSecSuccess ? Failure.invalidResult : Failure.status(ret)
         }
         var access: SecAccess?
         ret = SecAccessCreate(itemLabel as CFString, [extensionApp!, mainApp!] as CFArray, &access)
         if ret != errSecSuccess || access == nil {
             wg_log(.error, message: "Unable to create keychain ACL object: \(ret)")
-            return nil
+            throw ret == errSecSuccess ? Failure.invalidResult : Failure.status(ret)
         }
         items[kSecAttrAccess] = access!
         #else
@@ -74,12 +88,10 @@ class Keychain {
         ret = SecItemAdd(items as CFDictionary, &ref)
         if ret != errSecSuccess || ref == nil {
             wg_log(.error, message: "Unable to add config to keychain: \(ret)")
-            return nil
+            throw ret == errSecSuccess ? Failure.invalidResult : Failure.status(ret)
         }
-        if let oldRef = oldRef {
-            deleteReference(called: oldRef)
-        }
-        return ref as? Data
+        guard let reference = ref as? Data else { throw Failure.invalidResult }
+        return reference
     }
 
     static func deleteReference(called ref: Data) {
@@ -89,26 +101,8 @@ class Keychain {
         }
     }
 
-    static func deleteReferences(except whitelist: Set<Data>) {
-        var result: CFTypeRef?
-        let ret = SecItemCopyMatching([kSecClass: kSecClassGenericPassword,
-                                       kSecAttrService: Bundle.main.bundleIdentifier as Any,
-                                       kSecMatchLimit: kSecMatchLimitAll,
-                                       kSecReturnPersistentRef: true] as CFDictionary,
-                                      &result)
-        if ret != errSecSuccess || result == nil {
-            return
-        }
-        guard let items = result as? [Data] else { return }
-        for item in items {
-            if !whitelist.contains(item) {
-                deleteReference(called: item)
-            }
-        }
-    }
-
     static func verifyReference(called ref: Data) -> Bool {
         return SecItemCopyMatching([kSecValuePersistentRef: ref] as CFDictionary,
-                                   nil) != errSecItemNotFound
+                                   nil) == errSecSuccess
     }
 }

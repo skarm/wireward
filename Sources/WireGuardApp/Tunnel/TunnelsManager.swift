@@ -29,6 +29,30 @@ class TunnelsManager {
     private var statusObservationToken: NotificationToken?
     private var waiteeObservationToken: NSKeyValueObservation?
     private var configurationsObservationToken: NotificationToken?
+    private var pendingChanges: Set<ObjectIdentifier> = []
+    private var reloadDeferred = false
+    private var pendingNames: Set<String> = []
+
+    private func beginChange(to tunnel: TunnelContainer) -> Bool {
+        pendingChanges.insert(ObjectIdentifier(tunnel)).inserted
+    }
+
+    private func finishChange(to tunnel: TunnelContainer) {
+        pendingChanges.remove(ObjectIdentifier(tunnel))
+        resumeDeferredReload()
+    }
+
+    private func resumeDeferredReload() {
+        if pendingChanges.isEmpty && pendingNames.isEmpty && reloadDeferred {
+            reloadDeferred = false
+            reload()
+        }
+    }
+
+    private static var changeInProgress: Error {
+        NSError(domain: "Wireward.Configuration", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "A configuration change is already in progress."])
+    }
 
     init(tunnelProviders: [NETunnelProviderManager]) {
         tunnels = tunnelProviders.map { TunnelContainer(tunnel: $0) }.sorted { TunnelsManager.tunnelNameIsLessThan($0.name, $1.name) }
@@ -47,49 +71,30 @@ class TunnelsManager {
                 return
             }
 
-            var tunnelManagers = managers ?? []
-            var refs: Set<Data> = []
-            var tunnelNames: Set<String> = []
-            for (index, tunnelManager) in tunnelManagers.enumerated().reversed() {
-                if let tunnelName = tunnelManager.localizedDescription {
-                    tunnelNames.insert(tunnelName)
-                }
-                guard let proto = tunnelManager.protocolConfiguration as? NETunnelProviderProtocol else { continue }
-                if proto.migrateConfigurationIfNeeded(called: tunnelManager.localizedDescription ?? "unknown") {
-                    tunnelManager.saveOnMain { _ in }
-                }
+            let tunnelManagers = managers ?? []
+            Task { @MainActor in
+                // Finish migrations before exposing managers for editing.
+                for manager in tunnelManagers { await manager.migrateStoredConfigurationIfNeeded() }
+                // A failed Keychain read is not authorization to delete a VPN
+                // profile or sweep references from a potentially stale snapshot.
                 #if os(iOS)
-                let passwordRef = proto.verifyConfigurationReference() ? proto.passwordReference : nil
-                #elseif os(macOS)
-                let passwordRef: Data?
-                if proto.providerConfiguration?["UID"] as? uid_t == getuid() {
-                    passwordRef = proto.verifyConfigurationReference() ? proto.passwordReference : nil
-                } else {
-                    passwordRef = proto.passwordReference // To handle multiple users in macOS, we skip verifying
-                }
-                #else
-                #error("Unimplemented")
+                RecentTunnelsTracker.cleanupTunnels(except: Set(tunnelManagers.compactMap { $0.localizedDescription }))
                 #endif
-                if let ref = passwordRef {
-                    refs.insert(ref)
-                } else {
-                    wg_log(.info, message: "Removing orphaned tunnel with non-verifying keychain entry: \(tunnelManager.localizedDescription ?? "<unknown>")")
-                    tunnelManager.removeOnMain { _ in }
-                    tunnelManagers.remove(at: index)
-                }
+                completionHandler(.success(TunnelsManager(tunnelProviders: tunnelManagers)))
             }
-            Keychain.deleteReferences(except: refs)
-            #if os(iOS)
-            RecentTunnelsTracker.cleanupTunnels(except: tunnelNames)
-            #endif
-            completionHandler(.success(TunnelsManager(tunnelProviders: tunnelManagers)))
         }
         #endif
     }
 
     func reload() {
-        NETunnelProviderManager.loadAllOnMain { [weak self] managers, _ in
-            guard let self = self else { return }
+        guard pendingChanges.isEmpty && pendingNames.isEmpty else { reloadDeferred = true; return }
+        NETunnelProviderManager.loadAllOnMain { [weak self] managers, error in
+            guard let self else { return }
+            guard self.pendingChanges.isEmpty && self.pendingNames.isEmpty else { self.reloadDeferred = true; return }
+            if let error {
+                wg_log(.error, message: "Reload: Keeping existing tunnels after preference load failure: \(error)")
+                return
+            }
 
             let loadedTunnelProviders = managers ?? []
 
@@ -102,15 +107,19 @@ class TunnelsManager {
             }
             for loadedTunnelProvider in loadedTunnelProviders {
                 if let matchingTunnel = self.tunnels.first(where: { loadedTunnelProvider.isEquivalentTo($0) }) {
+                    // Reuse only a cache for the very same Keychain item. A locked
+                    // Keychain must not turn an existing readable tunnel into nil.
+                    if loadedTunnelProvider.protocolConfiguration?.passwordReference == matchingTunnel.tunnelProvider.protocolConfiguration?.passwordReference,
+                       let reference = loadedTunnelProvider.protocolConfiguration?.passwordReference, !reference.isEmpty,
+                       loadedTunnelProvider.tunnelConfiguration == nil {
+                        loadedTunnelProvider.cacheTunnelConfiguration(matchingTunnel.tunnelConfiguration)
+                    }
                     matchingTunnel.tunnelProvider = loadedTunnelProvider
                     matchingTunnel.refreshStatus()
                 } else {
                     // Tunnel was added outside the app
-                    if let proto = loadedTunnelProvider.protocolConfiguration as? NETunnelProviderProtocol {
-                        if proto.migrateConfigurationIfNeeded(called: loadedTunnelProvider.localizedDescription ?? "unknown") {
-                            loadedTunnelProvider.saveOnMain { _ in }
-                        }
-                    }
+                    // Legacy inline configurations remain readable until the next
+                    // startup migration; do not race a migration with user edits.
                     let tunnel = TunnelContainer(tunnel: loadedTunnelProvider)
                     self.tunnels.append(tunnel)
                     self.tunnels.sort { TunnelsManager.tunnelNameIsLessThan($0.name, $1.name) }
@@ -127,28 +136,41 @@ class TunnelsManager {
             return
         }
 
-        if tunnels.contains(where: { $0.name == tunnelName }) {
+        if pendingNames.contains(tunnelName) || tunnels.contains(where: { $0.name == tunnelName }) {
             completionHandler(.failure(TunnelsManagerError.tunnelAlreadyExistsWithThatName))
             return
         }
 
+        pendingNames.insert(tunnelName)
         let tunnelProviderManager = NETunnelProviderManager()
-        tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration)
+        do { try tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration) } catch {
+            pendingNames.remove(tunnelName)
+            resumeDeferredReload()
+            completionHandler(.failure(TunnelsManagerError.systemErrorOnAddTunnel(systemError: error)))
+            return
+        }
         tunnelProviderManager.isEnabled = true
 
         onDemandOption.apply(on: tunnelProviderManager)
 
         let activeTunnel = tunnels.first { $0.status == .active || $0.status == .activating }
+        let transaction = ConfigurationTransaction(oldReference: nil,
+            newReference: tunnelProviderManager.protocolConfiguration?.passwordReference,
+            restore: {}, delete: { Keychain.deleteReference(called: $0) })
 
         tunnelProviderManager.saveOnMain { [weak self] error in
+            guard transaction.finish(error: error) else { return }
+            defer { self?.pendingNames.remove(tunnelName); self?.resumeDeferredReload() }
             if let error = error {
                 wg_log(.error, message: "Add: Saving configuration failed: \(error)")
-                (tunnelProviderManager.protocolConfiguration as? NETunnelProviderProtocol)?.destroyConfigurationReference()
                 completionHandler(.failure(TunnelsManagerError.systemErrorOnAddTunnel(systemError: error)))
                 return
             }
 
-            guard let self = self else { return }
+            guard let self else {
+                completionHandler(.success(TunnelContainer(tunnel: tunnelProviderManager)))
+                return
+            }
 
             #if os(iOS)
             // HACK: In iOS, adding a tunnel causes deactivation of any currently active tunnel.
@@ -219,6 +241,10 @@ class TunnelsManager {
             return
         }
 
+        guard !pendingChanges.contains(ObjectIdentifier(tunnel)) else {
+            completionHandler(.systemErrorOnModifyTunnel(systemError: Self.changeInProgress))
+            return
+        }
         let tunnelProviderManager = tunnel.tunnelProvider
 
         let isIntroducingOnDemandRules = (tunnelProviderManager.onDemandRules ?? []).isEmpty && onDemandOption != .off
@@ -237,16 +263,34 @@ class TunnelsManager {
         let oldName = tunnelProviderManager.localizedDescription ?? ""
         let isNameChanged = tunnelName != oldName
         if isNameChanged {
-            guard !tunnels.contains(where: { $0.name == tunnelName }) else {
+            guard !pendingNames.contains(tunnelName), !tunnels.contains(where: { $0.name == tunnelName }) else {
                 completionHandler(TunnelsManagerError.tunnelAlreadyExistsWithThatName)
                 return
             }
-            tunnel.name = tunnelName
         }
+
+        guard beginChange(to: tunnel) else {
+            completionHandler(.systemErrorOnModifyTunnel(systemError: Self.changeInProgress))
+            return
+        }
+        pendingNames.insert(tunnelName)
+        let complete: @MainActor (TunnelsManagerError?) -> Void = { [weak self] error in
+            self?.pendingNames.remove(tunnelName)
+            self?.finishChange(to: tunnel)
+            completionHandler(error)
+        }
+        let oldProtocol = tunnelProviderManager.protocolConfiguration
+        let oldConfiguration = tunnelProviderManager.tunnelConfiguration
+        let oldEnabled = tunnelProviderManager.isEnabled
+        let oldOnDemandEnabled = tunnelProviderManager.isOnDemandEnabled
+        let oldOnDemandRules = tunnelProviderManager.onDemandRules
 
         var isTunnelConfigurationChanged = false
         if tunnelProviderManager.tunnelConfiguration != tunnelConfiguration {
-            tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration)
+            do { try tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration) } catch {
+                complete(.systemErrorOnModifyTunnel(systemError: error))
+                return
+            }
             isTunnelConfigurationChanged = true
         }
         tunnelProviderManager.isEnabled = true
@@ -257,14 +301,27 @@ class TunnelsManager {
             tunnelProviderManager.isOnDemandEnabled = true
         }
 
+        let transaction = ConfigurationTransaction(oldReference: oldProtocol?.passwordReference,
+            newReference: tunnelProviderManager.protocolConfiguration?.passwordReference,
+            restore: {
+                tunnelProviderManager.protocolConfiguration = oldProtocol
+                tunnelProviderManager.localizedDescription = oldName
+                tunnelProviderManager.cacheTunnelConfiguration(oldConfiguration)
+                tunnelProviderManager.isEnabled = oldEnabled
+                tunnelProviderManager.onDemandRules = oldOnDemandRules
+                tunnelProviderManager.isOnDemandEnabled = oldOnDemandEnabled
+            }, delete: { Keychain.deleteReference(called: $0) })
+
         tunnelProviderManager.saveOnMain { [weak self] error in
+            guard transaction.finish(error: error) else { return }
             if let error = error {
-                // TODO: the passwordReference for the old one has already been removed at this point and we can't easily roll back!
                 wg_log(.error, message: "Modify: Saving configuration failed: \(error)")
-                completionHandler(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
+                complete(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
                 return
             }
-            guard let self = self else { return }
+            guard let self = self else { complete(nil); return }
+            tunnel.name = tunnelName
+            tunnel.tunnelProvider = tunnelProviderManager
             if isNameChanged {
                 let oldIndex = self.tunnels.firstIndex(of: tunnel)!
                 self.tunnels.sort { TunnelsManager.tunnelNameIsLessThan($0.name, $1.name) }
@@ -291,29 +348,33 @@ class TunnelsManager {
                     tunnel.isActivateOnDemandEnabled = tunnelProviderManager.isOnDemandEnabled
                     if let error = error {
                         wg_log(.error, message: "Modify: Re-loading after saving configuration failed: \(error)")
-                        completionHandler(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
+                        complete(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
                     } else {
-                        completionHandler(nil)
+                        complete(nil)
                     }
                 }
             } else {
-                completionHandler(nil)
+                complete(nil)
             }
         }
     }
 
     func remove(tunnel: TunnelContainer, completionHandler: @escaping @MainActor (TunnelsManagerError?) -> Void) {
         let tunnelProviderManager = tunnel.tunnelProvider
-        #if os(macOS)
-        if tunnel.isTunnelAvailableToUser {
-            (tunnelProviderManager.protocolConfiguration as? NETunnelProviderProtocol)?.destroyConfigurationReference()
+        guard beginChange(to: tunnel) else {
+            completionHandler(.systemErrorOnRemoveTunnel(systemError: Self.changeInProgress))
+            return
         }
-        #elseif os(iOS)
-        (tunnelProviderManager.protocolConfiguration as? NETunnelProviderProtocol)?.destroyConfigurationReference()
+        #if os(macOS)
+        let reference = tunnel.isTunnelAvailableToUser ? tunnelProviderManager.protocolConfiguration?.passwordReference : nil
         #else
-        #error("Unimplemented")
+        let reference = tunnelProviderManager.protocolConfiguration?.passwordReference
         #endif
+        let transaction = ConfigurationTransaction(oldReference: reference, newReference: nil,
+            restore: {}, delete: { Keychain.deleteReference(called: $0) })
         tunnelProviderManager.removeOnMain { [weak self] error in
+            guard transaction.finish(error: error) else { return }
+            self?.finishChange(to: tunnel)
             if let error = error {
                 wg_log(.error, message: "Remove: Saving configuration failed: \(error)")
                 completionHandler(TunnelsManagerError.systemErrorOnRemoveTunnel(systemError: error))
@@ -366,21 +427,38 @@ class TunnelsManager {
     }
 
     func setOnDemandEnabled(_ isOnDemandEnabled: Bool, on tunnel: TunnelContainer, completionHandler: @escaping @MainActor (TunnelsManagerError?) -> Void) {
+        guard !pendingChanges.contains(ObjectIdentifier(tunnel)) else {
+            completionHandler(.systemErrorOnModifyTunnel(systemError: Self.changeInProgress))
+            return
+        }
         let tunnelProviderManager = tunnel.tunnelProvider
         let isCurrentlyEnabled = (tunnelProviderManager.isOnDemandEnabled && tunnelProviderManager.isEnabled)
         guard isCurrentlyEnabled != isOnDemandEnabled else {
             completionHandler(nil)
             return
         }
+        guard beginChange(to: tunnel) else {
+            completionHandler(.systemErrorOnModifyTunnel(systemError: Self.changeInProgress))
+            return
+        }
+        let complete: @MainActor (TunnelsManagerError?) -> Void = { [weak self] error in
+            self?.finishChange(to: tunnel)
+            completionHandler(error)
+        }
+        let oldEnabled = tunnelProviderManager.isEnabled
+        let oldOnDemandEnabled = tunnelProviderManager.isOnDemandEnabled
         let isActivatingOnDemand = !tunnelProviderManager.isOnDemandEnabled && isOnDemandEnabled
         tunnelProviderManager.isOnDemandEnabled = isOnDemandEnabled
         tunnelProviderManager.isEnabled = true
         tunnelProviderManager.saveOnMain { error in
             if let error = error {
+                tunnelProviderManager.isEnabled = oldEnabled
+                tunnelProviderManager.isOnDemandEnabled = oldOnDemandEnabled
                 wg_log(.error, message: "Modify On-Demand: Saving configuration failed: \(error)")
-                completionHandler(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
+                complete(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
                 return
             }
+            tunnel.tunnelProvider = tunnelProviderManager
             if isActivatingOnDemand {
                 // If we're enabling on-demand, we want to make sure the tunnel is enabled.
                 // If not enabled, the OS will not turn the tunnel on/off based on our rules.
@@ -389,13 +467,13 @@ class TunnelsManager {
                     tunnel.isActivateOnDemandEnabled = tunnelProviderManager.isOnDemandEnabled
                     if let error = error {
                         wg_log(.error, message: "Modify On-Demand: Re-loading after saving configuration failed: \(error)")
-                        completionHandler(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
+                        complete(TunnelsManagerError.systemErrorOnModifyTunnel(systemError: error))
                         return
                     }
-                    completionHandler(nil)
+                    complete(nil)
                 }
             } else {
-                completionHandler(nil)
+                complete(nil)
             }
         }
     }
@@ -433,6 +511,10 @@ class TunnelsManager {
 
     func startActivation(of tunnel: TunnelContainer) {
         guard tunnels.contains(tunnel) else { return } // Ensure it's not deleted
+        guard !pendingChanges.contains(ObjectIdentifier(tunnel)) else {
+            activationDelegate?.tunnelActivationAttemptFailed(tunnel: tunnel, error: .failedWhileSaving(systemError: Self.changeInProgress))
+            return
+        }
         guard tunnel.status == .inactive else {
             activationDelegate?.tunnelActivationAttemptFailed(tunnel: tunnel, error: .tunnelIsNotInactive)
             return
@@ -747,14 +829,42 @@ extension NETunnelProviderManager {
         return config
     }
 
-    func setTunnelConfiguration(_ tunnelConfiguration: TunnelConfiguration) {
-        protocolConfiguration = NETunnelProviderProtocol(tunnelConfiguration: tunnelConfiguration, previouslyFrom: protocolConfiguration)
-        localizedDescription = tunnelConfiguration.name
-        objc_setAssociatedObject(self, &NETunnelProviderManager.cachedConfigKey, tunnelConfiguration, objc_AssociationPolicy.OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    func cacheTunnelConfiguration(_ configuration: TunnelConfiguration?) {
+        objc_setAssociatedObject(self, &NETunnelProviderManager.cachedConfigKey, configuration, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    func setTunnelConfiguration(_ configuration: TunnelConfiguration) throws {
+        let replacement = try NETunnelProviderProtocol(tunnelConfiguration: configuration)
+        protocolConfiguration = replacement
+        localizedDescription = configuration.name
+        cacheTunnelConfiguration(configuration)
+    }
+
+    func migrateStoredConfigurationIfNeeded() async {
+        guard let proto = protocolConfiguration as? NETunnelProviderProtocol,
+              let original = proto.copy() as? NETunnelProviderProtocol else { return }
+        guard proto.migrateConfigurationIfNeeded(called: localizedDescription ?? "unknown") else { return }
+        // Canonicalizing iOS persistent references can produce a different Data
+        // value for the SAME item. Only a nil -> non-nil migration creates an item.
+        let createdReference = original.passwordReference == nil ? proto.passwordReference : nil
+        let transaction = ConfigurationTransaction(oldReference: nil, newReference: createdReference,
+            restore: { self.protocolConfiguration = original },
+            delete: { Keychain.deleteReference(called: $0) })
+        await withCheckedContinuation { continuation in
+            saveOnMain { error in
+                guard transaction.finish(error: error) else { return }
+                if let error { wg_log(.error, message: "Configuration migration save failed: \(error)") }
+                continuation.resume()
+            }
+        }
     }
 
     func isEquivalentTo(_ tunnel: TunnelContainer) -> Bool {
-        return localizedDescription == tunnel.name && tunnelConfiguration == tunnel.tunnelConfiguration
+        guard localizedDescription == tunnel.name else { return false }
+        if let reference = protocolConfiguration?.passwordReference,
+           reference == tunnel.tunnelProvider.protocolConfiguration?.passwordReference { return true }
+        guard let configuration = tunnelConfiguration else { return false }
+        return configuration == tunnel.tunnelConfiguration
     }
 }
 

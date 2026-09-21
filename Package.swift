@@ -14,6 +14,9 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
+        .target(name: "ConfigurationStore", path: "Sources/Shared/ConfigurationStore",
+                swiftSettings: [.treatAllWarnings(as: .error)]),
+        .testTarget(name: "ConfigurationStoreTests", dependencies: ["ConfigurationStore"]),
         .testTarget(name: "WireGuardKitTests", dependencies: ["WireGuardKit", "WireGuardKitGo"]),
         .target(
             name: "WireGuardKit",

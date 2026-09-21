@@ -38,7 +38,8 @@ class MockTunnels {
             let tunnelConfiguration = TunnelConfiguration(name: tunnelName, interface: interface, peers: [peer])
 
             let tunnelProviderManager = NETunnelProviderManager()
-            tunnelProviderManager.protocolConfiguration = NETunnelProviderProtocol(tunnelConfiguration: tunnelConfiguration)
+            guard let proto = try? NETunnelProviderProtocol(tunnelConfiguration: tunnelConfiguration) else { return nil }
+            tunnelProviderManager.protocolConfiguration = proto
             tunnelProviderManager.localizedDescription = tunnelConfiguration.name
             tunnelProviderManager.isEnabled = true
 

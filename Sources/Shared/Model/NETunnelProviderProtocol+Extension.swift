@@ -12,16 +12,13 @@ enum PacketTunnelProviderError: String, Error {
 }
 
 extension NETunnelProviderProtocol {
-    convenience init?(tunnelConfiguration: TunnelConfiguration, previouslyFrom old: NEVPNProtocol? = nil) {
+    convenience init(tunnelConfiguration: TunnelConfiguration) throws {
         self.init()
 
-        guard let name = tunnelConfiguration.name else { return nil }
-        guard let appId = Bundle.main.bundleIdentifier else { return nil }
+        guard let name = tunnelConfiguration.name else { throw Keychain.Failure.invalidAppConfiguration }
+        guard let appId = Bundle.main.bundleIdentifier else { throw Keychain.Failure.invalidAppConfiguration }
         providerBundleIdentifier = "\(appId).network-extension"
-        passwordReference = Keychain.makeReference(containing: tunnelConfiguration.asWgQuickConfig(), called: name, previouslyReferencedBy: old?.passwordReference)
-        if passwordReference == nil {
-            return nil
-        }
+        passwordReference = try Keychain.makeReference(containing: tunnelConfiguration.asWgQuickConfig(), called: name)
         #if os(macOS)
         providerConfiguration = ["UID": getuid()]
         #endif
@@ -47,11 +44,6 @@ extension NETunnelProviderProtocol {
         return nil
     }
 
-    func destroyConfigurationReference() {
-        guard let ref = passwordReference else { return }
-        Keychain.deleteReference(called: ref)
-    }
-
     func verifyConfigurationReference() -> Bool {
         guard let ref = passwordReference else { return false }
         return Keychain.verifyReference(called: ref)
@@ -64,6 +56,14 @@ extension NETunnelProviderProtocol {
          * around so that .mobileconfig files are easier.
          */
         if let oldConfig = providerConfiguration?["WgQuickConfig"] as? String {
+            // Do not erase the only copy when the Keychain is temporarily unavailable.
+            if let reference = passwordReference {
+                guard let stored = Keychain.openReference(called: reference),
+                      (try? TunnelConfiguration(fromWgQuickConfig: stored, called: name)) != nil else { return false }
+            } else {
+                guard let reference = try? Keychain.makeReference(containing: oldConfig, called: name) else { return false }
+                passwordReference = reference
+            }
             #if os(macOS)
             providerConfiguration = ["UID": getuid()]
             #elseif os(iOS)
@@ -71,9 +71,7 @@ extension NETunnelProviderProtocol {
             #else
             #error("Unimplemented")
             #endif
-            guard passwordReference == nil else { return true }
             wg_log(.info, message: "Migrating tunnel configuration '\(name)'")
-            passwordReference = Keychain.makeReference(containing: oldConfig, called: name)
             return true
         }
         #if os(macOS)
